@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Any
 
 # Веб-интерфейс
 try:
-    from flask import Flask, render_template_string, jsonify, request
+    from flask import Flask, jsonify, request
     FLASK_AVAILABLE = True
 except ImportError:
     FLASK_AVAILABLE = False
@@ -220,17 +220,20 @@ class NetworkCoordinator:
     """Координатор децентрализованной сети"""
     
     def __init__(self, host: str = None, worker_port: int = 8888, web_port: int = 8890):
-        # Автоматически определяем лучший хост если не указан
-        if host is None or host == "":
-            self.host = "0.0.0.0"
+        # Ключевое исправление: всегда используем публичный IP для web сервера
+        if host is None or host == "" or host == "0.0.0.0":
+            # Получаем публичный IP
+            self.public_host = NetworkUtils.get_best_public_ip()
+            if self.public_host == "0.0.0.0":
+                # Если не смогли определить, используем статический IP
+                self.public_host = "185.185.142.113"
+            self.host = "0.0.0.0"  # Flask будет слушать на всех интерфейсах
         else:
             self.host = host
+            self.public_host = host
         
         self.worker_port = worker_port
         self.web_port = web_port
-        
-        # Определяем публичный IP для отображения в интерфейсе
-        self.public_host = NetworkUtils.get_best_public_ip()
         
         # Данные сети
         self.workers: Dict[str, Dict] = {}
@@ -244,24 +247,26 @@ class NetworkCoordinator:
         # Веб-сервер с CORS
         self.app = Flask(__name__)
         
-        # Настройка CORS
+        # Настройка CORS - РУЧНАЯ НАСТРОЙКА для надежности
+        @self.app.after_request
+        def add_cors_headers(response):
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            return response
+        
+        # Дополнительно настраиваем flask-cors если доступен
         if CORS_AVAILABLE:
             CORS(self.app, resources={r"/api/*": {"origins": "*"}})
             logger.info("CORS включен через flask-cors")
         else:
-            # Ручная настройка CORS заголовков
-            @self.app.after_request
-            def add_cors_headers(response):
-                response.headers['Access-Control-Allow-Origin'] = '*'
-                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
-                response.headers['Access-Control-Allow-Credentials'] = 'true'
-                return response
             logger.info("CORS включен через ручные заголовки")
         
         self._setup_web_routes()
         
         logger.info(f"Инициализация координатора на {self.host}:{self.worker_port}")
+        logger.info(f"Публичный адрес: {self.public_host}")
     
     def _setup_web_routes(self):
         """Настройка маршрутов веб-сервера с CORS"""
@@ -319,8 +324,23 @@ class NetworkCoordinator:
         def api_submit():
             if request.method == 'OPTIONS':
                 return '', 200
+            
+            # Добавляем заголовки CORS
+            response_headers = {
+                'Access-Control-Allow-Origin': '*',
+                'Access-Control-Allow-Methods': 'POST, OPTIONS',
+                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept'
+            }
+            
             try:
-                data = request.json or {}
+                # Проверяем Content-Type
+                if not request.is_json:
+                    return jsonify({
+                        'status': 'error',
+                        'message': 'Content-Type должен быть application/json'
+                    }), 400, response_headers
+                
+                data = request.get_json() or {}
                 task_type = data.get('type', 'matrix_mult')
                 task_data = data.get('data', {})
                 
@@ -331,13 +351,13 @@ class NetworkCoordinator:
                     'task_id': task_id,
                     'message': 'Задача создана',
                     'type': task_type
-                })
+                }), 200, response_headers
             except Exception as e:
                 return jsonify({
                     'status': 'error',
                     'message': str(e),
                     'error_type': type(e).__name__
-                }), 400
+                }), 400, response_headers
         
         @self.app.route('/api/workers', methods=['GET', 'OPTIONS'])
         def api_workers():
@@ -367,11 +387,14 @@ class NetworkCoordinator:
             """Проверка здоровья API"""
             if request.method == 'OPTIONS':
                 return '', 200
+            
             return jsonify({
                 'status': 'healthy',
                 'timestamp': time.time(),
                 'service': 'ai-network-coordinator',
-                'version': '1.0.0'
+                'version': '1.0.0',
+                'host': self.public_host,
+                'port': self.web_port
             })
         
         @self.app.route('/api/test', methods=['GET', 'OPTIONS'])
@@ -396,16 +419,18 @@ class NetworkCoordinator:
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                body {{ font-family: Arial, sans-serif; margin: 40px; background: #0f3460; color: white; }}
                 .container {{ max-width: 1200px; margin: 0 auto; }}
                 .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
                           color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }}
                 .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }}
-                .card {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }}
-                .stat {{ font-size: 2em; font-weight: bold; color: #667eea; }}
-                .btn {{ background: #667eea; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }}
-                .api-info {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin-top: 30px; }}
-                code {{ background: #eee; padding: 2px 5px; border-radius: 3px; }}
+                .card {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; backdrop-filter: blur(10px); }}
+                .stat {{ font-size: 2em; font-weight: bold; color: #4cc9f0; }}
+                .btn {{ background: #4cc9f0; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }}
+                .api-info {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin-top: 30px; }}
+                code {{ background: rgba(0,0,0,0.3); padding: 2px 5px; border-radius: 3px; }}
+                .status-connected {{ color: #2ecc71; }}
+                .status-disconnected {{ color: #e74c3c; }}
             </style>
         </head>
         <body>
@@ -413,14 +438,15 @@ class NetworkCoordinator:
                 <div class="header">
                     <h1>🤖 AI Network Coordinator</h1>
                     <p>Децентрализованная сеть распределенных вычислений</p>
+                    <p>Публичный адрес: <code>{self.public_host}:{self.web_port}</code></p>
                 </div>
                 
                 <div class="cards">
                     <div class="card">
                         <h3>🌐 Сеть</h3>
-                        <p>Публичный адрес: <code>{self.public_host}</code></p>
+                        <p>Web интерфейс: <code>{self.public_host}:{self.web_port}</code></p>
                         <p>Порт рабочих: <code>{self.worker_port}</code></p>
-                        <p>Веб-порт: <code>{self.web_port}</code></p>
+                        <p>Текущий хост: <code>{self.host}</code></p>
                     </div>
                     
                     <div class="card">
@@ -436,6 +462,7 @@ class NetworkCoordinator:
                         <button class="btn" onclick="loadStats()">Обновить</button>
                         <button class="btn" onclick="testAPI()">Тест API</button>
                         <button class="btn" onclick="createTestTask()">Тест задача</button>
+                        <button class="btn" onclick="window.open('/api/health', '_blank')">Проверка здоровья</button>
                     </div>
                 </div>
                 
@@ -449,9 +476,15 @@ class NetworkCoordinator:
                     <p><code>GET /api/health</code> - Проверка здоровья</p>
                     <p><code>GET /api/test</code> - Тест CORS</p>
                     
-                    <h3 style="margin-top: 20px;">🔗 Публичный фронтенд</h3>
-                    <p>Используйте этот API для создания публичного интерфейса.</p>
-                    <p>Пример запроса: <code>fetch('http://{self.public_host}:{self.web_port}/api/stats')</code></p>
+                    <h3 style="margin-top: 20px;">🔗 Для фронтенда</h3>
+                    <p>Используйте этот URL для подключения фронтенда:</p>
+                    <p><code>http://{self.public_host}:{self.web_port}/api/</code></p>
+                    <p>Пример JavaScript:</p>
+                    <pre><code>
+fetch('http://{self.public_host}:{self.web_port}/api/health')
+  .then(response => response.json())
+  .then(data => console.log(data));
+                    </code></pre>
                 </div>
             </div>
             
@@ -497,6 +530,7 @@ class NetworkCoordinator:
                 
                 // Загружаем статистику при старте
                 loadStats();
+                setInterval(loadStats, 5000);
             </script>
         </body>
         </html>
@@ -524,7 +558,8 @@ class NetworkCoordinator:
                 'queue_length': len(self.task_queue),
                 'timestamp': time.time(),
                 'coordinator_uptime': time.time() - getattr(self, 'start_time', time.time()),
-                'public_host': self.public_host
+                'public_host': self.public_host,
+                'web_port': self.web_port
             }
     
     def _create_task(self, task_type: str, task_data: Dict) -> str:
@@ -642,7 +677,8 @@ class NetworkCoordinator:
                 'worker_id': worker_id,
                 'message': 'Добро пожаловать в AI Network!',
                 'timestamp': time.time(),
-                'coordinator': self.public_host
+                'coordinator': self.public_host,
+                'web_port': self.web_port
             }
             welcome_json = json.dumps(welcome_msg)
             conn.sendall(welcome_json.encode())
@@ -886,23 +922,21 @@ class NetworkCoordinator:
             server = NetworkUtils.create_socket()
             
             # Для привязки используем 0.0.0.0 для IPv4 или :: для IPv6
-            bind_host = self.host
-            if bind_host == "0.0.0.0":
-                # Пытаемся привязаться ко всем интерфейсам
-                try:
-                    server.bind(("::", self.worker_port))
-                    logger.info(f"Сервер привязан к [::]:{self.worker_port} (IPv6)")
-                except:
-                    server.bind((bind_host, self.worker_port))
-                    logger.info(f"Сервер привязан к {bind_host}:{self.worker_port} (IPv4)")
-            else:
+            bind_host = "0.0.0.0"  # Всегда слушаем на всех интерфейсах
+            
+            try:
+                # Пытаемся привязаться ко всем интерфейсам (IPv6)
+                server.bind(("::", self.worker_port))
+                logger.info(f"Сервер привязан к [::]:{self.worker_port} (IPv6)")
+            except:
+                # Если не получилось, используем IPv4
                 server.bind((bind_host, self.worker_port))
-                logger.info(f"Сервер привязан к {bind_host}:{self.worker_port}")
+                logger.info(f"Сервер привязан к {bind_host}:{self.worker_port} (IPv4)")
             
             server.listen(10)
             server.settimeout(1)  # Таймаут для accept
             
-            logger.info(f"Сервер для рабочих запущен на {self.public_host}:{self.worker_port}")
+            logger.info(f"Сервер для рабочих запущен. Подключение: {self.public_host}:{self.worker_port}")
             
             while self.running:
                 try:
@@ -939,7 +973,8 @@ class NetworkCoordinator:
         logger.info("=" * 60)
         logger.info(f"🌐 Веб-интерфейс: http://{self.public_host}:{self.web_port}")
         logger.info(f"📡 Порт для рабочих: {self.worker_port}")
-        logger.info(f"🔗 Адрес для подключения: {self.public_host}:{self.worker_port}")
+        logger.info(f"🔗 Адрес для рабочих: {self.public_host}:{self.worker_port}")
+        logger.info(f"🏠 Слушаем на: {self.host}:{self.web_port}")
         logger.info(f"✅ CORS: {'Enabled' if CORS_AVAILABLE else 'Manual headers'}")
         logger.info("=" * 60)
         
@@ -959,15 +994,16 @@ class NetworkCoordinator:
             # Даем время серверу запуститься
             time.sleep(1)
             
-            # Запускаем веб-сервер
+            # Запускаем веб-сервер Flask
             import warnings
             warnings.filterwarnings("ignore", message=".*Werkzeug.*")
             
             logger.info("✅ Система запущена и готова к работе!")
             logger.info("👷 Ожидание подключения рабочих узлов...")
             
+            # Важное исправление: Flask всегда слушает на всех интерфейсах
             self.app.run(
-                host=self.host,
+                host=self.host,  # 0.0.0.0 - слушаем на всех интерфейсах
                 port=self.web_port,
                 debug=False,
                 use_reloader=False,
@@ -976,6 +1012,8 @@ class NetworkCoordinator:
             
         except KeyboardInterrupt:
             logger.info("Получен сигнал завершения...")
+        except Exception as e:
+            logger.error(f"Ошибка запуска Flask: {e}")
         finally:
             self.running = False
             logger.info("Координатор остановлен")
@@ -1400,14 +1438,13 @@ def main():
                        help='Порт веб-интерфейса (по умолчанию: 8890)')
     parser.add_argument('--name', 
                        help='Имя рабочего узла')
-    parser.add_argument('--public-host', default=None,
-                       help='Публичный хост (автоматически определяется)')
     
     args = parser.parse_args()
     
     if args.coordinator:
+        # Для координатора всегда используем 0.0.0.0 чтобы слушать на всех интерфейсах
         coordinator = NetworkCoordinator(
-            host=args.host,
+            host="0.0.0.0",  # Всегда слушаем на всех интерфейсах
             worker_port=args.port,
             web_port=args.web_port
         )
@@ -1442,10 +1479,8 @@ def main():
         print("  2. Подключение рабочего:")
         print("     python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
         print()
-        print("  3. Указать свой хост:")
-        print("     python ai_network.py --coordinator --host 0.0.0.0")
-        print()
         print("📡 Публичный API:")
+        print(f"    • Проверка: GET http://185.185.142.113:8890/api/health")
         print(f"    • Статус: GET http://185.185.142.113:8890/api/status")
         print(f"    • Задачи: GET http://185.185.142.113:8890/api/tasks")
         print(f"    • Отправить: POST http://185.185.142.113:8890/api/submit")
