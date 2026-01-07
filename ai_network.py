@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Децентрализованная AI сеть MVP для VPS
-Упрощенная версия для Ubuntu VPS
+Исправленная версия с устойчивым соединением
 """
 
 import socket
@@ -10,6 +10,7 @@ import json
 import time
 import random
 import math
+import hashlib
 from datetime import datetime
 import logging
 import argparse
@@ -19,7 +20,6 @@ import uuid
 
 # Веб-интерфейс
 from flask import Flask, render_template_string, jsonify, request
-import webbrowser
 
 # Настройка логирования
 logging.basicConfig(
@@ -236,7 +236,7 @@ class CoordinatorVPS:
                     <h2>🔗 Как подключиться</h2>
                     <p>Для подключения рабочих узлов выполните:</p>
                     <code style="background: #f8f9fa; padding: 10px; display: block; border-radius: 5px;">
-                        python3 worker_client.py --host {{ server_ip }} --port 8888
+                        python3 ai_network.py --worker --host {{ server_ip }} --port 8888 --name "Ваше_Имя"
                     </code>
                     <p>Где {{ server_ip }} - IP адрес этого сервера</p>
                 </div>
@@ -274,7 +274,7 @@ class CoordinatorVPS:
                             if (data.workers && data.workers.length > 0) {
                                 workersDiv.innerHTML = data.workers.map(w => `
                                     <div style="background: #e9ecef; padding: 10px; margin: 5px 0; border-radius: 5px;">
-                                        ${w.addr} - ${w.status}
+                                        ${w.addr} - ${w.status} (был ${w.last_seen})
                                     </div>
                                 `).join('');
                             } else {
@@ -360,7 +360,7 @@ class CoordinatorVPS:
                     workers_list.append({
                         'id': worker_id,
                         'addr': f"{worker['addr'][0]}:{worker['addr'][1]}",
-                        'status': 'active',
+                        'status': worker.get('status', 'active'),
                         'last_seen': worker['last_seen'].strftime('%H:%M:%S')
                     })
                 
@@ -439,7 +439,7 @@ class CoordinatorVPS:
         logger.info(f"🚀 Запуск AI Network на VPS")
         logger.info(f"📡 Порт для рабочих: {self.worker_port}")
         logger.info(f"🌐 Веб-интерфейс: http://{self.host if self.host != '0.0.0.0' else 'localhost'}:{self.web_port}")
-        logger.info(f"🔗 IP сервера: {socket.gethostbyname(socket.gethostname())}")
+        logger.info(f"🔗 IP сервера: {self._get_public_ip()}")
         
         # Запускаем сервер для рабочих
         worker_server_thread = threading.Thread(target=self._run_worker_server, daemon=True)
@@ -453,20 +453,9 @@ class CoordinatorVPS:
         cleaner_thread = threading.Thread(target=self._cleanup_workers, daemon=True)
         cleaner_thread.start()
         
-        # Запускаем Flask в отдельном потоке
-        import warnings
-        warnings.filterwarnings("ignore", message=".*Werkzeug.*")
-        
-        flask_thread = threading.Thread(
-            target=lambda: self.app.run(
-                host=self.host,
-                port=self.web_port,
-                debug=False,
-                use_reloader=False
-            ),
-            daemon=True
-        )
-        flask_thread.start()
+        # Запускаем heartbeat отправку
+        heartbeat_thread = threading.Thread(target=self._send_heartbeats, daemon=True)
+        heartbeat_thread.start()
         
         logger.info("✅ Система запущена!")
         logger.info("👷 Ожидание подключения рабочих узлов...")
@@ -477,6 +466,21 @@ class CoordinatorVPS:
         except KeyboardInterrupt:
             logger.info("Выключение...")
             self.running = False
+    
+    def _get_public_ip(self):
+        """Получение публичного IP"""
+        try:
+            import urllib.request
+            return urllib.request.urlopen('https://ifconfig.me').read().decode('utf-8')
+        except:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+                return ip
+            except:
+                return self.host
     
     def _run_worker_server(self):
         """Сервер для приема рабочих"""
@@ -490,6 +494,9 @@ class CoordinatorVPS:
         while self.running:
             try:
                 conn, addr = server.accept()
+                # Устанавливаем таймаут для сокета
+                conn.settimeout(300)  # 5 минут
+                
                 worker_thread = threading.Thread(
                     target=self._handle_worker,
                     args=(conn, addr),
@@ -501,7 +508,7 @@ class CoordinatorVPS:
                     logger.error(f"Ошибка сервера: {e}")
     
     def _handle_worker(self, conn, addr):
-        """Обработка подключения рабочего"""
+        """Обработка подключения рабочего - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         worker_id = f"{addr[0]}:{addr[1]}-{int(time.time())}"
         
         logger.info(f"📥 Подключился рабочий: {worker_id}")
@@ -512,16 +519,45 @@ class CoordinatorVPS:
                 'addr': addr,
                 'last_seen': datetime.now(),
                 'current_task': None,
-                'status': 'ready'
+                'status': 'ready',
+                'capabilities': {}
             }
         
         try:
-            conn.settimeout(30)
+            # Устанавливаем большой таймаут
+            conn.settimeout(300)
             
+            # Сначала получаем регистрацию от рабочего
+            try:
+                data = conn.recv(4096)
+                if data:
+                    try:
+                        message = json.loads(data.decode('utf-8'))
+                        if message.get('type') == 'capabilities':
+                            with self.lock:
+                                if worker_id in self.workers:
+                                    self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
+                                    self.workers[worker_id]['name'] = message.get('name', 'Unknown')
+                                    logger.info(f"📋 Рабочий {worker_id} зарегистрирован как: {message.get('name', 'Unknown')}")
+                    except json.JSONDecodeError:
+                        logger.warning(f"Некорректный JSON от {worker_id}")
+            except socket.timeout:
+                logger.warning(f"Таймаут регистрации от {worker_id}")
+            
+            # Отправляем подтверждение регистрации
+            welcome_msg = {
+                'type': 'welcome',
+                'worker_id': worker_id,
+                'status': 'connected',
+                'message': 'Добро пожаловать в AI Network!'
+            }
+            conn.sendall(json.dumps(welcome_msg).encode())
+            
+            # Основной цикл обработки рабочего
             while self.running:
                 try:
-                    # Читаем данные от рабочего
-                    data = self._receive_simple(conn, timeout=5)
+                    # Получаем данные от рабочего
+                    data = conn.recv(4096)
                     
                     if data:
                         try:
@@ -533,7 +569,7 @@ class CoordinatorVPS:
                                         self.workers[worker_id]['last_seen'] = datetime.now()
                                 
                                 # Отправляем ответ
-                                response = {'type': 'heartbeat_ack'}
+                                response = {'type': 'heartbeat_ack', 'timestamp': time.time()}
                                 conn.sendall(json.dumps(response).encode())
                                 
                             elif message.get('type') == 'result':
@@ -549,27 +585,30 @@ class CoordinatorVPS:
                                         if result.get('status') == 'success':
                                             self.tasks[task_id]['status'] = 'completed'
                                             self.tasks[task_id]['result'] = result
+                                            logger.info(f"✅ Задача {task_id} успешно выполнена рабочим {worker_id}")
                                         else:
                                             self.tasks[task_id]['status'] = 'failed'
                                             self.tasks[task_id]['result'] = result
+                                            logger.warning(f"❌ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
                                 
-                                logger.info(f"✅ Рабочий {worker_id} завершил задачу {task_id}")
                                 self._assign_tasks()
-                            
-                            elif message.get('type') == 'capabilities':
-                                # Рабочий отправляет свои возможности
-                                with self.lock:
-                                    if worker_id in self.workers:
-                                        self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
                             
                         except json.JSONDecodeError:
                             logger.warning(f"Некорректный JSON от {worker_id}")
                     
-                    # Проверяем, не отключился ли рабочий
-                    time.sleep(1)
+                    # Обновляем время последней активности
+                    with self.lock:
+                        if worker_id in self.workers:
+                            self.workers[worker_id]['last_seen'] = datetime.now()
+                    
+                    time.sleep(1)  # Небольшая пауза чтобы не грузить CPU
                     
                 except socket.timeout:
+                    # Таймаут - это нормально, просто продолжаем
                     continue
+                except ConnectionResetError:
+                    logger.warning(f"Соединение с {worker_id} разорвано")
+                    break
                 except Exception as e:
                     logger.error(f"Ошибка обработки рабочего {worker_id}: {e}")
                     break
@@ -582,6 +621,41 @@ class CoordinatorVPS:
                 conn.close()
             except:
                 pass
+    
+    def _send_heartbeats(self):
+        """Отправка heartbeat рабочим"""
+        while self.running:
+            try:
+                time.sleep(30)  # Отправляем heartbeat каждые 30 секунд
+                
+                with self.lock:
+                    workers_to_check = list(self.workers.keys())
+                
+                for worker_id in workers_to_check:
+                    try:
+                        with self.lock:
+                            if worker_id not in self.workers:
+                                continue
+                            worker = self.workers[worker_id]
+                        
+                        # Проверяем, не было ли активности более 60 секунд
+                        time_diff = (datetime.now() - worker['last_seen']).total_seconds()
+                        if time_diff > 60:
+                            logger.debug(f"Отправляем heartbeat рабочему {worker_id}")
+                            try:
+                                conn = worker['conn']
+                                heartbeat_msg = {'type': 'heartbeat', 'timestamp': time.time()}
+                                conn.sendall(json.dumps(heartbeat_msg).encode())
+                            except:
+                                # Если ошибка отправки, удаляем рабочего
+                                self._remove_worker(worker_id)
+                    
+                    except Exception as e:
+                        logger.debug(f"Ошибка heartbeat для {worker_id}: {e}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка потока heartbeat: {e}")
+                time.sleep(30)
     
     def _task_processor(self):
         """Обработчик задач"""
@@ -660,6 +734,7 @@ class CoordinatorVPS:
                     self.tasks[current_task]['status'] = 'pending'
                     self.tasks[current_task]['worker'] = None
                     self.task_queue.insert(0, current_task)
+                    logger.warning(f"🚨 Задача {current_task} возвращена в очередь из-за отключения рабочего {worker_id}")
                 
                 del self.workers[worker_id]
                 logger.info(f"🗑️ Рабочий {worker_id} удален")
@@ -668,7 +743,7 @@ class CoordinatorVPS:
         """Очистка неактивных рабочих"""
         while self.running:
             try:
-                time.sleep(60)
+                time.sleep(120)  # Проверяем каждые 2 минуты
                 
                 with self.lock:
                     to_remove = []
@@ -676,38 +751,28 @@ class CoordinatorVPS:
                     
                     for worker_id, worker in self.workers.items():
                         time_diff = (now - worker['last_seen']).total_seconds()
-                        if time_diff > 120:  # 2 минуты без активности
+                        if time_diff > 300:  # 5 минут без активности
                             to_remove.append(worker_id)
                     
                     for worker_id in to_remove:
+                        logger.warning(f"⏰ Рабочий {worker_id} удален по таймауту (неактивен {time_diff:.0f} сек)")
                         try:
                             self.workers[worker_id]['conn'].close()
                         except:
                             pass
                         self._remove_worker(worker_id)
-                        logger.warning(f"Рабочий {worker_id} удален по таймауту")
                 
             except Exception as e:
                 logger.error(f"Ошибка очистки: {e}")
-    
-    def _receive_simple(self, conn, timeout=5, buffer_size=4096):
-        """Упрощенное получение данных"""
-        conn.settimeout(timeout)
-        try:
-            data = conn.recv(buffer_size)
-            return data if data else None
-        except socket.timeout:
-            return None
-        except:
-            return None
 
 # ========== Клиент для рабочих узлов ==========
 class WorkerClient:
     def __init__(self, host='localhost', port=8888, name=None):
         self.host = host
         self.port = port
-        self.name = name or f"Worker_{os.getpid()}"
+        self.name = name or f"Worker_{os.getpid()}_{random.randint(1000, 9999)}"
         self.running = True
+        self.connected = False
     
     def start(self):
         """Запуск рабочего клиента"""
@@ -720,6 +785,9 @@ class WorkerClient:
                 sock.settimeout(10)
                 sock.connect((self.host, self.port))
                 
+                # Устанавливаем большой таймаут после подключения
+                sock.settimeout(300)
+                
                 # Отправляем информацию о себе
                 capabilities = {
                     'type': 'capabilities',
@@ -730,17 +798,25 @@ class WorkerClient:
                 
                 sock.sendall(json.dumps(capabilities).encode())
                 
-                logger.info(f"✅ Подключен к серверу как {self.name}")
+                # Ждем приветственное сообщение
+                data = sock.recv(4096)
+                if data:
+                    welcome = json.loads(data.decode())
+                    if welcome.get('type') == 'welcome':
+                        logger.info(f"✅ {welcome.get('message')}")
+                        logger.info(f"🆔 Ваш ID: {welcome.get('worker_id')}")
+                
+                self.connected = True
+                logger.info(f"🚀 Рабочий {self.name} готов к работе!")
+                
+                # Запускаем поток для отправки heartbeat
+                heartbeat_thread = threading.Thread(target=self._send_heartbeats, args=(sock,), daemon=True)
+                heartbeat_thread.start()
                 
                 # Основной цикл
-                while self.running:
+                while self.running and self.connected:
                     try:
-                        # Отправляем heartbeat каждые 10 секунд
-                        heartbeat = {'type': 'heartbeat'}
-                        sock.sendall(json.dumps(heartbeat).encode())
-                        
                         # Получаем задачи
-                        sock.settimeout(10)
                         data = sock.recv(4096)
                         
                         if data:
@@ -748,8 +824,8 @@ class WorkerClient:
                                 message = json.loads(data.decode('utf-8'))
                                 
                                 if message.get('type') == 'task':
-                                    task_id = message.get('task_id')
-                                    task_type = message.get('task_type')
+                                    task_id = message['task_id']
+                                    task_type = message['task_type']
                                     task_data = message.get('data', {})
                                     
                                     logger.info(f"📥 Получена задача: {task_id} ({task_type})")
@@ -766,26 +842,56 @@ class WorkerClient:
                                     
                                     sock.sendall(json.dumps(response).encode())
                                     logger.info(f"✅ Задача {task_id} выполнена")
-                            
+                                
+                                elif message.get('type') == 'heartbeat':
+                                    # Отвечаем на heartbeat от сервера
+                                    response = {'type': 'heartbeat_ack', 'timestamp': time.time()}
+                                    sock.sendall(json.dumps(response).encode())
+                                    
                             except json.JSONDecodeError:
                                 logger.warning("Некорректный JSON от сервера")
                         
-                        time.sleep(10)  # Интервал между heartbeat
-                        
                     except socket.timeout:
                         continue
+                    except ConnectionResetError:
+                        logger.error("🔌 Соединение разорвано сервером")
+                        self.connected = False
+                        break
                     except Exception as e:
                         logger.error(f"Ошибка обработки: {e}")
+                        self.connected = False
                         break
                 
                 sock.close()
+                self.connected = False
+                logger.warning("🔌 Отключено от сервера")
                 
             except ConnectionRefusedError:
                 logger.warning("❌ Не могу подключиться к серверу, повтор через 10 секунд...")
                 time.sleep(10)
+            except socket.timeout:
+                logger.warning("⏰ Таймаут подключения, повтор...")
+                time.sleep(10)
             except Exception as e:
                 logger.error(f"Ошибка подключения: {e}")
                 time.sleep(10)
+    
+    def _send_heartbeats(self, sock):
+        """Отправка heartbeat серверу"""
+        while self.running and self.connected:
+            try:
+                time.sleep(20)  # Отправляем каждые 20 секунд
+                
+                heartbeat = {
+                    'type': 'heartbeat',
+                    'timestamp': time.time(),
+                    'worker_name': self.name
+                }
+                
+                sock.sendall(json.dumps(heartbeat).encode())
+                
+            except:
+                break
     
     def _process_task(self, task_type, task_data):
         """Обработка задачи"""
@@ -851,7 +957,8 @@ class WorkerClient:
             else:
                 return {
                     'status': 'error',
-                    'message': f'Неизвестный тип задачи: {task_type}'
+                    'message': f'Неизвестный тип задачи: {task_type}',
+                    'worker': self.name
                 }
                 
         except Exception as e:
@@ -878,11 +985,12 @@ def main():
         print("=" * 60)
         print("🚀 ЗАПУСК AI NETWORK НА VPS")
         print("=" * 60)
-        print(f"🌐 Веб-интерфейс: http://{args.host if args.host != '0.0.0.0' else 'localhost'}:{args.web_port}")
+        public_ip = CoordinatorVPS()._get_public_ip()
+        print(f"🌐 Веб-интерфейс: http://{public_ip}:{args.web_port}")
         print(f"📡 Порт для рабочих: {args.port}")
         print("=" * 60)
         print("\n📢 Инструкция для подключения рабочих:")
-        print(f"python3 ai_network_vps.py --worker --host VPS_IP --port {args.port}")
+        print(f"python3 ai_network.py --worker --host {public_ip} --port {args.port} --name 'Ваше_Имя'")
         print("=" * 60)
         
         coordinator = CoordinatorVPS(
@@ -890,6 +998,22 @@ def main():
             worker_port=args.port,
             web_port=args.web_port
         )
+        
+        # Запускаем Flask в отдельном потоке
+        import warnings
+        warnings.filterwarnings("ignore", message=".*Werkzeug.*")
+        
+        flask_thread = threading.Thread(
+            target=lambda: coordinator.app.run(
+                host=args.host,
+                port=args.web_port,
+                debug=False,
+                use_reloader=False
+            ),
+            daemon=True
+        )
+        flask_thread.start()
+        
         coordinator.start()
     
     elif args.worker:
@@ -911,10 +1035,10 @@ def main():
         Примеры:
         
         1. На VPS (сервер):
-        python3 ai_network_vps.py --coordinator --host 0.0.0.0 --port 8888
+        python3 ai_network.py --coordinator --host 0.0.0.0 --port 8888
         
         2. На клиенте (рабочий узел):
-        python3 ai_network_vps.py --worker --host IP_VPS --port 8888 --name "My_PC"
+        python3 ai_network.py --worker --host IP_VPS --port 8888 --name "My_PC"
         
         🔧 Требования:
         - Python 3.7+
