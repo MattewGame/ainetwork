@@ -2,7 +2,7 @@
 """
 🚀 Децентрализованная AI сеть MVP - Универсальная версия
 Поддержка IPv4/IPv6, автоматическое определение адресов
-Исправленная версия с правильной обработкой JSON
+Исправленная версия с разделением JSON сообщений
 """
 
 import socket
@@ -465,7 +465,7 @@ class NetworkCoordinator:
                 </header>
                 
                 <div class="info-box">
-                    <h3>📡 Информация о сервере</h3>
+                    <h3>📡 Информация о сервера</h3>
                     <p><strong>Адрес сервера:</strong> {self.public_host}</p>
                     <p><strong>Порт для рабочих:</strong> {self.worker_port}</p>
                     <p><strong>Веб-порт:</strong> {self.web_port}</p>
@@ -787,7 +787,7 @@ class NetworkCoordinator:
             return False
     
     def _handle_worker_connection(self, conn: socket.socket, addr: tuple):
-        """Обработка подключения рабочего - УЛУЧШЕННАЯ версия"""
+        """Обработка подключения рабочего - ИСПРАВЛЕНО: разделение JSON сообщений"""
         worker_id = f"{addr[0]}:{addr[1]}-{int(time.time())}"
         
         logger.info(f"Новое подключение рабочего: {worker_id}")
@@ -808,7 +808,7 @@ class NetworkCoordinator:
             # Устанавливаем таймаут
             conn.settimeout(30)
             
-            # ИСПРАВЛЕНО: СРАЗУ отправляем приветственное сообщение
+            # Отправляем приветственное сообщение
             welcome_msg = {
                 'type': 'welcome',
                 'worker_id': worker_id,
@@ -822,59 +822,44 @@ class NetworkCoordinator:
             # Теперь ждем регистрацию от рабочего с таймаутом
             conn.settimeout(10)
             try:
-                data = conn.recv(4096)
-                if data:
-                    # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ: что мы получили
-                    raw_data = data.decode('utf-8', errors='ignore')
-                    logger.debug(f"Получены данные от рабочего {worker_id}: '{raw_data}'")
-                    
-                    # Пробуем найти JSON в данных (может быть мусор в начале/конце)
+                # Читаем данные пока не получим полное сообщение
+                buffer = ""
+                start_time = time.time()
+                while self.running and time.time() - start_time < 10:
                     try:
-                        # Пытаемся распарсить сразу
-                        message = json.loads(raw_data.strip())
-                        
-                        if message.get('type') == 'capabilities':
-                            # Сохраняем возможности рабочего
-                            with self.lock:
-                                if worker_id in self.workers:
-                                    self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
-                                    self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
-                                    logger.info(f"Рабочий {worker_id} зарегистрирован как '{self.workers[worker_id]['name']}'")
-                        else:
-                            logger.warning(f"Неожиданное сообщение при регистрации от {worker_id}: {message.get('type')}")
-                    except json.JSONDecodeError as e:
-                        # Пробуем найти JSON в строке
-                        logger.debug(f"Прямой парсинг не удался: {e}")
-                        
-                        # Ищем открывающую и закрывающую скобки
-                        start_idx = raw_data.find('{')
-                        end_idx = raw_data.rfind('}')
-                        
-                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-                            json_str = raw_data[start_idx:end_idx+1]
-                            try:
-                                message = json.loads(json_str)
-                                
+                        conn.settimeout(0.1)  # Короткий таймаут для чтения
+                        data = conn.recv(4096)
+                        if data:
+                            buffer += data.decode('utf-8', errors='ignore')
+                            
+                            # Пробуем распарсить JSON из буфера
+                            messages = self._extract_json_messages(buffer)
+                            for message in messages:
                                 if message.get('type') == 'capabilities':
                                     # Сохраняем возможности рабочего
                                     with self.lock:
                                         if worker_id in self.workers:
                                             self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
                                             self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
-                                            logger.info(f"Рабочий {worker_id} зарегистрирован (исправлен JSON) как '{self.workers[worker_id]['name']}'")
-                                else:
-                                    logger.warning(f"Неожиданное сообщение (исправленный JSON) от {worker_id}: {message.get('type')}")
-                            except json.JSONDecodeError as e2:
-                                logger.error(f"Не удалось распарсить JSON от рабочего {worker_id}: {e2}")
-                                logger.error(f"Сырые данные: {repr(raw_data)}")
-            except socket.timeout:
-                logger.warning(f"Таймаут ожидания регистрации от рабочего {worker_id}")
-                # Продолжаем, возможно worker отправит данные позже
+                                            logger.info(f"Рабочий {worker_id} зарегистрирован как '{self.workers[worker_id]['name']}'")
+                                    return  # Завершаем чтение после регистрации
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        logger.error(f"Ошибка чтения регистрации: {e}")
+                        break
+                
+                if not any(msg.get('type') == 'capabilities' for msg in self._extract_json_messages(buffer)):
+                    logger.warning(f"Не получена регистрация от рабочего {worker_id}")
+                    
+            except Exception as e:
+                logger.error(f"Ошибка ожидания регистрации: {e}")
             
             # Возвращаем обычный таймаут
             conn.settimeout(30)
             
             # Основной цикл обработки
+            buffer = ""
             while self.running:
                 try:
                     # Получаем данные от рабочего
@@ -884,56 +869,18 @@ class NetworkCoordinator:
                         logger.info(f"Рабочий {worker_id} отключился")
                         break
                     
-                    try:
-                        raw_data = data.decode('utf-8', errors='ignore')
-                        message = json.loads(raw_data.strip())
-                        
-                        if message.get('type') == 'heartbeat':
-                            # Обновляем время последней активности
-                            with self.lock:
-                                if worker_id in self.workers:
-                                    self.workers[worker_id]['last_seen'] = time.time()
-                            
-                            # Отправляем подтверждение
-                            ack = {'type': 'heartbeat_ack', 'timestamp': time.time()}
-                            conn.sendall(json.dumps(ack).encode())
-                            
-                        elif message.get('type') == 'capabilities':
-                            # Обновляем возможности (может прийти позже)
-                            with self.lock:
-                                if worker_id in self.workers:
-                                    self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
-                                    self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
-                                    logger.info(f"Обновлены данные рабочего {worker_id}: {self.workers[worker_id]['name']}")
-                            
-                        elif message.get('type') == 'result':
-                            # Обработка результата задачи
-                            task_id = message.get('task_id')
-                            result = message.get('result', {})
-                            
-                            with self.lock:
-                                if worker_id in self.workers:
-                                    self.workers[worker_id]['current_task'] = None
-                                
-                                if task_id in self.tasks:
-                                    if result.get('status') == 'success':
-                                        self.tasks[task_id]['status'] = 'completed'
-                                        self.tasks[task_id]['result'] = result
-                                        logger.info(f"Задача {task_id} успешно выполнена")
-                                    else:
-                                        self.tasks[task_id]['status'] = 'failed'
-                                        self.tasks[task_id]['result'] = result
-                                        logger.warning(f"Задача {task_id} завершилась с ошибкой")
-                            
-                            # Пробуем назначить следующую задачу
-                            self._assign_tasks()
-                            
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Некорректный JSON от рабочего {worker_id}: {e}")
-                        logger.debug(f"Сырые данные: {repr(data.decode('utf-8', errors='ignore'))}")
+                    buffer += data.decode('utf-8', errors='ignore')
+                    
+                    # Обрабатываем все полные сообщения в буфере
+                    messages = self._extract_json_messages(buffer)
+                    
+                    for message in messages:
+                        self._process_worker_message(worker_id, conn, message)
+                    
+                    # Очищаем буфер от обработанных сообщений
+                    buffer = self._clean_buffer(buffer)
                     
                 except socket.timeout:
-                    # Таймаут - нормальная ситуация
                     continue
                 except ConnectionResetError:
                     logger.info(f"Соединение с {worker_id} разорвано")
@@ -951,6 +898,97 @@ class NetworkCoordinator:
                 conn.close()
             except:
                 pass
+    
+    def _extract_json_messages(self, buffer: str) -> List[Dict]:
+        """Извлечь все полные JSON сообщения из буфера"""
+        messages = []
+        start = 0
+        depth = 0
+        in_string = False
+        escape = False
+        
+        for i, char in enumerate(buffer):
+            if not in_string:
+                if char == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # Нашли полный JSON объект
+                        try:
+                            message = json.loads(buffer[start:i+1])
+                            messages.append(message)
+                        except json.JSONDecodeError:
+                            # Пропускаем некорректный JSON
+                            pass
+                elif char == '"':
+                    in_string = True
+            else:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+        
+        return messages
+    
+    def _clean_buffer(self, buffer: str) -> str:
+        """Очистить буфер от обработанных JSON сообщений"""
+        # Находим последнюю закрывающую скобку
+        last_close = buffer.rfind('}')
+        if last_close != -1:
+            # Оставляем только данные после последнего полного JSON
+            return buffer[last_close + 1:]
+        return buffer
+    
+    def _process_worker_message(self, worker_id: str, conn: socket.socket, message: Dict):
+        """Обработать сообщение от рабочего"""
+        try:
+            if message.get('type') == 'heartbeat':
+                # Обновляем время последней активности
+                with self.lock:
+                    if worker_id in self.workers:
+                        self.workers[worker_id]['last_seen'] = time.time()
+                
+                # Отправляем подтверждение
+                ack = {'type': 'heartbeat_ack', 'timestamp': time.time()}
+                conn.sendall(json.dumps(ack).encode())
+                
+            elif message.get('type') == 'capabilities':
+                # Обновляем возможности (может прийти позже)
+                with self.lock:
+                    if worker_id in self.workers:
+                        self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
+                        self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
+                        logger.info(f"Обновлены данные рабочего {worker_id}: {self.workers[worker_id]['name']}")
+                
+            elif message.get('type') == 'result':
+                # Обработка результата задачи
+                task_id = message.get('task_id')
+                result = message.get('result', {})
+                
+                with self.lock:
+                    if worker_id in self.workers:
+                        self.workers[worker_id]['current_task'] = None
+                    
+                    if task_id in self.tasks:
+                        if result.get('status') == 'success':
+                            self.tasks[task_id]['status'] = 'completed'
+                            self.tasks[task_id]['result'] = result
+                            logger.info(f"Задача {task_id} успешно выполнена")
+                        else:
+                            self.tasks[task_id]['status'] = 'failed'
+                            self.tasks[task_id]['result'] = result
+                            logger.warning(f"Задача {task_id} завершилась с ошибкой")
+                
+                # Пробуем назначить следующую задачу
+                self._assign_tasks()
+                
+        except Exception as e:
+            logger.error(f"Ошибка обработки сообщения от рабочего {worker_id}: {e}")
     
     def _remove_worker(self, worker_id: str):
         """Удалить отключившегося рабочего"""
@@ -1149,9 +1187,9 @@ class WorkerNode:
             return None
     
     def register_with_server(self, sock: socket.socket) -> bool:
-        """Регистрация на сервере - УЛУЧШЕННАЯ версия"""
+        """Регистрация на сервере - ИСПРАВЛЕНО: отправляем только одно сообщение"""
         try:
-            # ИСПРАВЛЕНО: Сначала ждем приветственное сообщение от сервера
+            # Ждем приветственное сообщение от сервера
             sock.settimeout(10)
             logger.info("⏳ Ожидание приветствия от сервера...")
             data = sock.recv(4096)
@@ -1161,7 +1199,6 @@ class WorkerNode:
                 return False
             
             raw_response = data.decode('utf-8', errors='ignore')
-            logger.debug(f"Получен ответ от сервера: '{raw_response}'")
             
             # Пробуем распарсить JSON
             try:
@@ -1174,7 +1211,7 @@ class WorkerNode:
                     json_str = raw_response[start_idx:end_idx+1]
                     response = json.loads(json_str)
                 else:
-                    logger.error(f"❌ Не удалось распарсить JSON от сервера: '{raw_response}'")
+                    logger.error(f"❌ Не удалось распарсить JSON от сервера")
                     return False
             
             if response.get('type') == 'welcome':
@@ -1182,7 +1219,10 @@ class WorkerNode:
                 logger.info(f"✅ {response.get('message')}")
                 logger.info(f"🆔 Ваш ID: {self.worker_id}")
                 
-                # Теперь отправляем регистрацию
+                # Ждем немного перед отправкой регистрации
+                time.sleep(0.1)
+                
+                # Теперь отправляем регистрацию (ТОЛЬКО ОДНО СООБЩЕНИЕ)
                 registration = {
                     'type': 'capabilities',
                     'name': self.name,
@@ -1215,7 +1255,7 @@ class WorkerNode:
             return False
     
     def _send_heartbeat(self, sock: socket.socket):
-        """Отправить heartbeat"""
+        """Отправить heartbeat - ИСПРАВЛЕНО: отдельное сообщение"""
         try:
             heartbeat = {
                 'type': 'heartbeat',
@@ -1223,6 +1263,7 @@ class WorkerNode:
                 'timestamp': time.time()
             }
             heartbeat_json = json.dumps(heartbeat)
+            # Отправляем ОТДЕЛЬНЫМ сообщением
             sock.sendall(heartbeat_json.encode())
         except Exception as e:
             logger.warning(f"⚠️ Ошибка отправки heartbeat: {e}")
@@ -1341,9 +1382,11 @@ class WorkerNode:
                     
                     if data:
                         raw_data = data.decode('utf-8', errors='ignore')
-                        try:
-                            message = json.loads(raw_data.strip())
-                            
+                        
+                        # Обрабатываем все JSON сообщения в полученных данных
+                        messages = self._extract_json_messages(raw_data)
+                        
+                        for message in messages:
                             if message.get('type') == 'task':
                                 task_id = message['task_id']
                                 task_type = message['task_type']
@@ -1369,13 +1412,10 @@ class WorkerNode:
                                     logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
                                 else:
                                     logger.warning(f"⚠️ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
-                                
+                            
                             elif message.get('type') == 'heartbeat_ack':
                                 # Подтверждение heartbeat
                                 pass
-                                
-                        except json.JSONDecodeError:
-                            logger.warning(f"⚠️ Некорректный JSON от сервера: '{raw_data}'")
                         
                 except socket.timeout:
                     continue
@@ -1396,6 +1436,42 @@ class WorkerNode:
                 sock.close()
             except:
                 pass
+    
+    def _extract_json_messages(self, buffer: str) -> List[Dict]:
+        """Извлечь все полные JSON сообщения из буфера"""
+        messages = []
+        start = 0
+        depth = 0
+        in_string = False
+        escape = False
+        
+        for i, char in enumerate(buffer):
+            if not in_string:
+                if char == '{':
+                    if depth == 0:
+                        start = i
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # Нашли полный JSON объект
+                        try:
+                            message = json.loads(buffer[start:i+1])
+                            messages.append(message)
+                        except json.JSONDecodeError:
+                            # Пропускаем некорректный JSON
+                            pass
+                elif char == '"':
+                    in_string = True
+            else:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+        
+        return messages
     
     def start(self):
         """Запуск рабочего узла"""
