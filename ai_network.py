@@ -2,7 +2,7 @@
 """
 🚀 Децентрализованная AI сеть MVP - Универсальная версия
 Поддержка IPv4/IPv6, автоматическое определение адресов
-Исправленная версия с разделением JSON сообщений
+Исправленная версия без преждевременного удаления рабочих
 """
 
 import socket
@@ -787,7 +787,7 @@ class NetworkCoordinator:
             return False
     
     def _handle_worker_connection(self, conn: socket.socket, addr: tuple):
-        """Обработка подключения рабочего - ИСПРАВЛЕНО: разделение JSON сообщений"""
+        """Обработка подключения рабочего - ИСПРАВЛЕНО: не завершаем после регистрации"""
         worker_id = f"{addr[0]}:{addr[1]}-{int(time.time())}"
         
         logger.info(f"Новое подключение рабочего: {worker_id}")
@@ -819,21 +819,24 @@ class NetworkCoordinator:
             conn.sendall(welcome_json.encode())
             logger.info(f"Отправлено приветствие рабочему {worker_id}")
             
-            # Теперь ждем регистрацию от рабочего с таймаутом
+            # Ждем регистрацию от рабочего
             conn.settimeout(10)
+            registered = False
+            
             try:
-                # Читаем данные пока не получим полное сообщение
                 buffer = ""
                 start_time = time.time()
-                while self.running and time.time() - start_time < 10:
+                
+                while not registered and time.time() - start_time < 10:
                     try:
-                        conn.settimeout(0.1)  # Короткий таймаут для чтения
+                        conn.settimeout(0.5)
                         data = conn.recv(4096)
                         if data:
                             buffer += data.decode('utf-8', errors='ignore')
                             
-                            # Пробуем распарсить JSON из буфера
+                            # Пробуем найти JSON сообщение о возможностях
                             messages = self._extract_json_messages(buffer)
+                            
                             for message in messages:
                                 if message.get('type') == 'capabilities':
                                     # Сохраняем возможности рабочего
@@ -842,20 +845,25 @@ class NetworkCoordinator:
                                             self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
                                             self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
                                             logger.info(f"Рабочий {worker_id} зарегистрирован как '{self.workers[worker_id]['name']}'")
-                                    return  # Завершаем чтение после регистрации
+                                            registered = True
+                                            break
+                                    
+                            if registered:
+                                break
+                                
                     except socket.timeout:
                         continue
                     except Exception as e:
                         logger.error(f"Ошибка чтения регистрации: {e}")
                         break
                 
-                if not any(msg.get('type') == 'capabilities' for msg in self._extract_json_messages(buffer)):
+                if not registered:
                     logger.warning(f"Не получена регистрация от рабочего {worker_id}")
                     
             except Exception as e:
                 logger.error(f"Ошибка ожидания регистрации: {e}")
             
-            # Возвращаем обычный таймаут
+            # Возвращаем обычный таймаут для основного цикла
             conn.settimeout(30)
             
             # Основной цикл обработки
@@ -880,6 +888,11 @@ class NetworkCoordinator:
                     # Очищаем буфер от обработанных сообщений
                     buffer = self._clean_buffer(buffer)
                     
+                    # Обновляем время последней активности
+                    with self.lock:
+                        if worker_id in self.workers:
+                            self.workers[worker_id]['last_seen'] = time.time()
+                    
                 except socket.timeout:
                     continue
                 except ConnectionResetError:
@@ -892,7 +905,7 @@ class NetworkCoordinator:
         except Exception as e:
             logger.error(f"Ошибка соединения с {worker_id}: {e}")
         finally:
-            # Удаляем рабочего
+            # Удаляем рабочего только если соединение закрыто
             self._remove_worker(worker_id)
             try:
                 conn.close()
@@ -1187,7 +1200,7 @@ class WorkerNode:
             return None
     
     def register_with_server(self, sock: socket.socket) -> bool:
-        """Регистрация на сервере - ИСПРАВЛЕНО: отправляем только одно сообщение"""
+        """Регистрация на сервере"""
         try:
             # Ждем приветственное сообщение от сервера
             sock.settimeout(10)
@@ -1222,7 +1235,7 @@ class WorkerNode:
                 # Ждем немного перед отправкой регистрации
                 time.sleep(0.1)
                 
-                # Теперь отправляем регистрацию (ТОЛЬКО ОДНО СООБЩЕНИЕ)
+                # Отправляем регистрацию
                 registration = {
                     'type': 'capabilities',
                     'name': self.name,
@@ -1255,7 +1268,7 @@ class WorkerNode:
             return False
     
     def _send_heartbeat(self, sock: socket.socket):
-        """Отправить heartbeat - ИСПРАВЛЕНО: отдельное сообщение"""
+        """Отправить heartbeat"""
         try:
             heartbeat = {
                 'type': 'heartbeat',
@@ -1263,7 +1276,6 @@ class WorkerNode:
                 'timestamp': time.time()
             }
             heartbeat_json = json.dumps(heartbeat)
-            # Отправляем ОТДЕЛЬНЫМ сообщением
             sock.sendall(heartbeat_json.encode())
         except Exception as e:
             logger.warning(f"⚠️ Ошибка отправки heartbeat: {e}")
@@ -1383,7 +1395,7 @@ class WorkerNode:
                     if data:
                         raw_data = data.decode('utf-8', errors='ignore')
                         
-                        # Обрабатываем все JSON сообщения в полученных данных
+                        # Извлекаем все JSON сообщения
                         messages = self._extract_json_messages(raw_data)
                         
                         for message in messages:
