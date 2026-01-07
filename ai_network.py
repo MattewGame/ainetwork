@@ -2,6 +2,7 @@
 """
 🚀 Децентрализованная AI сеть MVP - Универсальная версия
 Поддержка IPv4/IPv6, автоматическое определение адресов
+Улучшенная обработка ошибок подключения
 """
 
 import socket
@@ -200,19 +201,12 @@ class NetworkUtils:
         return sock
     
     @staticmethod
-    def is_valid_ip(ip: str) -> bool:
-        """Проверить, является ли строка валидным IP-адресом"""
-        try:
-            # Проверка IPv4
-            socket.inet_pton(socket.AF_INET, ip)
-            return True
-        except socket.error:
-            try:
-                # Проверка IPv6
-                socket.inet_pton(socket.AF_INET6, ip)
-                return True
-            except socket.error:
-                return False
+    def create_client_socket() -> socket.socket:
+        """Создать сокет для клиента с улучшенными настройками"""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Отключаем алгоритм Нейгла
+        return sock
 
 # ========== КООРДИНАТОР СЕТИ ==========
 class NetworkCoordinator:
@@ -1065,22 +1059,49 @@ class WorkerNode:
         self.running = False
         self.connected = False
         self.worker_id = None
+        self.connection_attempts = 0
+        self.max_connection_attempts = 10
+        self.reconnect_delay = 5  # начальная задержка переподключения
     
-    def connect(self) -> Optional[socket.socket]:
-        """Подключиться к координатору"""
+    def safe_connect(self) -> Optional[socket.socket]:
+        """Безопасное подключение с улучшенной обработкой ошибок"""
         try:
-            # Создаем сокет для подключения
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
+            # Создаем сокет с улучшенными настройками
+            sock = NetworkUtils.create_client_socket()
+            
+            # Устанавливаем таймаут подключения
+            sock.settimeout(15)  # Увеличиваем таймаут до 15 секунд
             
             logger.info(f"Подключение к {self.server_host}:{self.server_port}...")
             
             # Пробуем подключиться
             sock.connect((self.server_host, self.server_port))
             
-            # Устанавливаем таймаут после подключения
-            sock.settimeout(300)
+            # После успешного подключения увеличиваем таймаут
+            sock.settimeout(30)
             
+            logger.info(f"✅ Успешно подключено к {self.server_host}:{self.server_port}")
+            return sock
+            
+        except socket.timeout:
+            logger.error("⚠️ Таймаут подключения. Проверьте доступность сервера.")
+            return None
+        except ConnectionRefusedError:
+            logger.error("❌ Сервер отказал в подключении. Убедитесь, что координатор запущен.")
+            return None
+        except socket.gaierror as e:
+            logger.error(f"❌ Ошибка разрешения адреса {self.server_host}: {e}")
+            return None
+        except ConnectionResetError:
+            logger.error("⚠️ Сервер разорвал соединение. Возможно, фаервол блокирует подключение.")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения: {type(e).__name__}: {e}")
+            return None
+    
+    def register_with_server(self, sock: socket.socket) -> bool:
+        """Регистрация на сервере"""
+        try:
             # Регистрируемся
             registration = {
                 'type': 'capabilities',
@@ -1096,8 +1117,10 @@ class WorkerNode:
             
             sock.sendall(json.dumps(registration).encode())
             
-            # Ждем ответ
+            # Ждем ответ с таймаутом
+            sock.settimeout(10)
             data = sock.recv(4096)
+            
             if data:
                 response = json.loads(data.decode())
                 if response.get('type') == 'welcome':
@@ -1105,24 +1128,21 @@ class WorkerNode:
                     logger.info(f"✅ {response.get('message')}")
                     logger.info(f"🆔 Ваш ID: {self.worker_id}")
                     self.connected = True
-                    return sock
+                    return True
                 else:
-                    logger.error(f"Неожиданный ответ сервера: {response}")
+                    logger.error(f"❌ Неожиданный ответ сервера: {response}")
             
-            return None
+            return False
             
         except socket.timeout:
-            logger.error("Таймаут подключения")
-            return None
-        except ConnectionRefusedError:
-            logger.error("Не удалось подключиться. Проверьте адрес сервера и порт.")
-            return None
-        except socket.gaierror as e:
-            logger.error(f"Ошибка разрешения адреса {self.server_host}: {e}")
-            return None
+            logger.error("❌ Таймаут при регистрации")
+            return False
+        except json.JSONDecodeError:
+            logger.error("❌ Некорректный JSON от сервера")
+            return False
         except Exception as e:
-            logger.error(f"Ошибка подключения: {e}")
-            return None
+            logger.error(f"❌ Ошибка регистрации: {type(e).__name__}: {e}")
+            return False
     
     def _send_heartbeat(self, sock: socket.socket):
         """Отправить heartbeat"""
@@ -1133,8 +1153,8 @@ class WorkerNode:
                 'timestamp': time.time()
             }
             sock.sendall(json.dumps(heartbeat).encode())
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ Ошибка отправки heartbeat: {e}")
     
     def _process_task(self, task_type: str, task_data: Dict) -> Dict:
         """Обработать задачу"""
@@ -1227,95 +1247,168 @@ class WorkerNode:
                 'timestamp': time.time()
             }
     
+    def worker_loop(self, sock: socket.socket):
+        """Основной цикл работы рабочего"""
+        last_heartbeat = 0
+        last_activity = time.time()
+        
+        try:
+            while self.running and self.connected:
+                current_time = time.time()
+                
+                # Отправляем heartbeat каждые 20 секунд
+                if current_time - last_heartbeat > 20:
+                    self._send_heartbeat(sock)
+                    last_heartbeat = current_time
+                
+                try:
+                    # Проверяем наличие задач с небольшим таймаутом
+                    sock.settimeout(2)
+                    data = sock.recv(4096)
+                    
+                    if data:
+                        last_activity = time.time()
+                        try:
+                            message = json.loads(data.decode('utf-8'))
+                            
+                            if message.get('type') == 'task':
+                                task_id = message['task_id']
+                                task_type = message['task_type']
+                                task_data = message.get('data', {})
+                                
+                                logger.info(f"📥 Получена задача: {task_id} ({task_type})")
+                                
+                                # Обрабатываем задачу
+                                result = self._process_task(task_type, task_data)
+                                
+                                # Отправляем результат
+                                response = {
+                                    'type': 'result',
+                                    'task_id': task_id,
+                                    'result': result,
+                                    'timestamp': time.time()
+                                }
+                                
+                                sock.sendall(json.dumps(response).encode())
+                                
+                                if result['status'] == 'success':
+                                    logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
+                                else:
+                                    logger.warning(f"⚠️ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
+                                
+                            elif message.get('type') == 'heartbeat_ack':
+                                # Подтверждение heartbeat
+                                pass
+                                
+                        except json.JSONDecodeError:
+                            logger.warning("⚠️ Некорректный JSON от сервера")
+                    
+                    # Проверка активности (если нет активности 60 секунд)
+                    if current_time - last_activity > 60:
+                        logger.info("ℹ️ Отправка heartbeat для поддержания соединения...")
+                        self._send_heartbeat(sock)
+                        last_activity = current_time
+                        
+                except socket.timeout:
+                    # Таймаут - нормальная ситуация, продолжаем цикл
+                    continue
+                except ConnectionResetError:
+                    logger.error("❌ Соединение разорвано сервером")
+                    self.connected = False
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Ошибка приема данных: {type(e).__name__}: {e}")
+                    self.connected = False
+                    break
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка в рабочем цикле: {type(e).__name__}: {e}")
+            self.connected = False
+        finally:
+            try:
+                sock.close()
+            except:
+                pass
+    
     def start(self):
         """Запуск рабочего узла"""
         self.running = True
         
         logger.info(f"👷 Запуск рабочего узла: {self.name}")
-        logger.info(f"📡 Сервер: {self.server_host}:{self.server_port}")
-        
-        last_heartbeat = 0
+        logger.info(f"📡 Подключение к серверу: {self.server_host}:{self.server_port}")
+        logger.info("=" * 50)
         
         while self.running:
-            sock = self.connect()
-            
-            if not sock:
-                logger.warning("Повторная попытка через 10 секунд...")
-                time.sleep(10)
-                continue
-            
             try:
-                logger.info("🚀 Рабочий узел готов к выполнению задач!")
+                # Сбрасываем счетчик попыток если был успешный коннект
+                if self.connected:
+                    self.connection_attempts = 0
+                    self.reconnect_delay = 5
+                else:
+                    self.connection_attempts += 1
                 
-                while self.running and self.connected:
-                    current_time = time.time()
+                # Проверяем максимальное количество попыток
+                if self.connection_attempts > self.max_connection_attempts:
+                    logger.error(f"❌ Превышено максимальное количество попыток подключения ({self.max_connection_attempts})")
+                    logger.info("⚠️ Проверьте:")
+                    logger.info("  1. Запущен ли координатор на сервере")
+                    logger.info("  2. Правильность IP-адреса и порта")
+                    logger.info("  3. Настройки фаервола и антивируса")
+                    logger.info("  4. Доступность сервера из сети")
+                    self.running = False
+                    break
+                
+                # Подключаемся к серверу
+                sock = self.safe_connect()
+                
+                if not sock:
+                    if self.connection_attempts == 1:
+                        logger.info("💡 Советы по устранению проблем:")
+                        logger.info("  1. Убедитесь, что координатор запущен")
+                        logger.info("  2. Проверьте правильность IP-адреса: 185.185.142.113")
+                        logger.info("  3. Проверьте, открыт ли порт 8888 на сервере")
+                        logger.info("  4. Отключите фаервол или антивирус на время теста")
                     
-                    # Отправляем heartbeat каждые 20 секунд
-                    if current_time - last_heartbeat > 20:
-                        self._send_heartbeat(sock)
-                        last_heartbeat = current_time
+                    logger.warning(f"⚠️ Повторная попытка через {self.reconnect_delay} сек... (попытка {self.connection_attempts}/{self.max_connection_attempts})")
+                    time.sleep(self.reconnect_delay)
                     
-                    try:
-                        # Проверяем наличие задач
-                        sock.settimeout(1)
-                        data = sock.recv(4096)
-                        
-                        if data:
-                            try:
-                                message = json.loads(data.decode('utf-8'))
-                                
-                                if message.get('type') == 'task':
-                                    task_id = message['task_id']
-                                    task_type = message['task_type']
-                                    task_data = message.get('data', {})
-                                    
-                                    logger.info(f"📥 Получена задача: {task_id}")
-                                    
-                                    # Обрабатываем задачу
-                                    result = self._process_task(task_type, task_data)
-                                    
-                                    # Отправляем результат
-                                    response = {
-                                        'type': 'result',
-                                        'task_id': task_id,
-                                        'result': result,
-                                        'timestamp': time.time()
-                                    }
-                                    
-                                    sock.sendall(json.dumps(response).encode())
-                                    if result['status'] == 'success':
-                                        logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
-                                    else:
-                                        logger.warning(f"❌ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
-                                    
-                                elif message.get('type') == 'heartbeat_ack':
-                                    # Подтверждение heartbeat
-                                    pass
-                                    
-                            except json.JSONDecodeError:
-                                logger.warning("Некорректный JSON от сервера")
-                        
-                    except socket.timeout:
-                        continue
-                    except ConnectionResetError:
-                        logger.error("Соединение разорвано сервером")
-                        self.connected = False
-                        break
-                    except Exception as e:
-                        logger.error(f"Ошибка приема данных: {e}")
-                        self.connected = False
-                        break
+                    # Экспоненциальная задержка переподключения
+                    self.reconnect_delay = min(self.reconnect_delay * 1.5, 60)  # Максимум 60 секунд
+                    continue
                 
-                sock.close()
-                self.connected = False
-                
-                if self.running:
-                    logger.warning("Переподключение через 5 секунд...")
+                # Регистрируемся на сервере
+                if not self.register_with_server(sock):
+                    logger.warning("⚠️ Ошибка регистрации, переподключение...")
+                    sock.close()
                     time.sleep(5)
+                    continue
                 
+                # Сбрасываем счетчик попыток при успешной регистрации
+                self.connection_attempts = 0
+                self.reconnect_delay = 5
+                
+                # Запускаем основной рабочий цикл
+                logger.info("🚀 Рабочий узел готов к выполнению задач!")
+                logger.info("=" * 50)
+                
+                self.worker_loop(sock)
+                
+                # Если отключились, но еще работаем
+                if self.running and not self.connected:
+                    logger.warning("⚠️ Потеряно соединение с сервером")
+                    logger.info(f"🔌 Переподключение через {self.reconnect_delay} сек...")
+                    time.sleep(self.reconnect_delay)
+                    self.reconnect_delay = min(self.reconnect_delay * 1.5, 60)
+                
+            except KeyboardInterrupt:
+                logger.info("👋 Получен сигнал завершения...")
+                self.running = False
+                break
             except Exception as e:
-                logger.error(f"Ошибка в основном цикле: {e}")
-                time.sleep(5)
+                logger.error(f"❌ Критическая ошибка в основном цикле: {type(e).__name__}: {e}")
+                time.sleep(10)
+        
+        logger.info("👷 Рабочий узел остановлен")
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 def main():
