@@ -2,7 +2,7 @@
 """
 🚀 Децентрализованная AI сеть MVP - Универсальная версия
 Поддержка IPv4/IPv6, автоматическое определение адресов
-Исправленная версия без преждевременного удаления рабочих
+CORS поддержка для фронтенда
 """
 
 import socket
@@ -27,6 +27,14 @@ except ImportError:
     FLASK_AVAILABLE = False
     print("⚠️ Flask не установлен. Установите: pip install flask")
     sys.exit(1)
+
+# CORS поддержка
+try:
+    from flask_cors import CORS
+    CORS_AVAILABLE = True
+except ImportError:
+    CORS_AVAILABLE = False
+    print("⚠️ Flask-CORS не установлен. Установите: pip install flask-cors")
 
 # Настройка логирования
 logging.basicConfig(
@@ -233,21 +241,39 @@ class NetworkCoordinator:
         self.lock = threading.RLock()
         self.running = False
         
-        # Веб-сервер
+        # Веб-сервер с CORS
         self.app = Flask(__name__)
+        
+        # Настройка CORS
+        if CORS_AVAILABLE:
+            CORS(self.app, resources={r"/api/*": {"origins": "*"}})
+            logger.info("CORS включен через flask-cors")
+        else:
+            # Ручная настройка CORS заголовков
+            @self.app.after_request
+            def add_cors_headers(response):
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+                response.headers['Access-Control-Allow-Credentials'] = 'true'
+                return response
+            logger.info("CORS включен через ручные заголовки")
+        
         self._setup_web_routes()
         
         logger.info(f"Инициализация координатора на {self.host}:{self.worker_port}")
     
     def _setup_web_routes(self):
-        """Настройка маршрутов веб-сервера"""
+        """Настройка маршрутов веб-сервера с CORS"""
         
         @self.app.route('/')
         def index():
             return self._get_web_interface()
         
-        @self.app.route('/api/status', methods=['GET'])
+        @self.app.route('/api/status', methods=['GET', 'OPTIONS'])
         def api_status():
+            if request.method == 'OPTIONS':
+                return '', 200
             return jsonify({
                 'status': 'running',
                 'coordinator': {
@@ -255,25 +281,44 @@ class NetworkCoordinator:
                     'worker_port': self.worker_port,
                     'web_port': self.web_port,
                     'uptime': getattr(self, 'start_time', time.time())
-                }
+                },
+                'cors': 'enabled',
+                'api_version': '1.0'
             })
         
-        @self.app.route('/api/stats', methods=['GET'])
+        @self.app.route('/api/stats', methods=['GET', 'OPTIONS'])
         def api_stats():
+            if request.method == 'OPTIONS':
+                return '', 200
             with self.lock:
                 stats = self._get_stats()
             return jsonify(stats)
         
-        @self.app.route('/api/tasks', methods=['GET'])
+        @self.app.route('/api/tasks', methods=['GET', 'OPTIONS'])
         def api_tasks():
+            if request.method == 'OPTIONS':
+                return '', 200
             with self.lock:
+                # Преобразуем задачи в список для JSON сериализации
+                tasks_list = []
+                for task_id, task in self.tasks.items():
+                    task_copy = task.copy()
+                    # Преобразуем любые несериализуемые объекты
+                    if 'result' in task_copy and task_copy['result']:
+                        if hasattr(task_copy['result'], '__dict__'):
+                            task_copy['result'] = str(task_copy['result'])
+                    tasks_list.append(task_copy)
+                
                 return jsonify({
-                    'tasks': list(self.tasks.values()),
-                    'queue': self.task_queue
+                    'tasks': tasks_list,
+                    'queue': self.task_queue,
+                    'total_tasks': len(tasks_list)
                 })
         
-        @self.app.route('/api/submit', methods=['POST'])
+        @self.app.route('/api/submit', methods=['POST', 'OPTIONS'])
         def api_submit():
+            if request.method == 'OPTIONS':
+                return '', 200
             try:
                 data = request.json or {}
                 task_type = data.get('type', 'matrix_mult')
@@ -284,16 +329,20 @@ class NetworkCoordinator:
                 return jsonify({
                     'status': 'success',
                     'task_id': task_id,
-                    'message': 'Задача создана'
+                    'message': 'Задача создана',
+                    'type': task_type
                 })
             except Exception as e:
                 return jsonify({
                     'status': 'error',
-                    'message': str(e)
+                    'message': str(e),
+                    'error_type': type(e).__name__
                 }), 400
         
-        @self.app.route('/api/workers', methods=['GET'])
+        @self.app.route('/api/workers', methods=['GET', 'OPTIONS'])
         def api_workers():
+            if request.method == 'OPTIONS':
+                return '', 200
             with self.lock:
                 workers = []
                 for worker_id, worker in self.workers.items():
@@ -303,380 +352,151 @@ class NetworkCoordinator:
                         'address': f"{worker['addr'][0]}:{worker['addr'][1]}",
                         'status': worker.get('status', 'unknown'),
                         'last_seen': worker.get('last_seen', time.time()),
-                        'current_task': worker.get('current_task')
+                        'current_task': worker.get('current_task'),
+                        'capabilities': worker.get('capabilities', {})
                     })
                 
-                return jsonify({'workers': workers})
+                return jsonify({
+                    'workers': workers,
+                    'total_workers': len(workers),
+                    'connected_workers': len([w for w in workers if w['status'] == 'connected'])
+                })
+        
+        @self.app.route('/api/health', methods=['GET', 'OPTIONS'])
+        def api_health():
+            """Проверка здоровья API"""
+            if request.method == 'OPTIONS':
+                return '', 200
+            return jsonify({
+                'status': 'healthy',
+                'timestamp': time.time(),
+                'service': 'ai-network-coordinator',
+                'version': '1.0.0'
+            })
+        
+        @self.app.route('/api/test', methods=['GET', 'OPTIONS'])
+        def api_test():
+            """Тестовый endpoint для проверки CORS"""
+            if request.method == 'OPTIONS':
+                return '', 200
+            return jsonify({
+                'message': 'CORS работает!',
+                'method': request.method,
+                'origin': request.headers.get('Origin', 'none'),
+                'timestamp': time.time()
+            })
     
     def _get_web_interface(self):
-        """Генерация веб-интерфейса"""
+        """Генерация веб-интерфейса координатора"""
         html = f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <title>🤖 AI Network - Децентрализованные вычисления</title>
+            <title>🤖 AI Network - Координатор</title>
             <meta charset="utf-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-                body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
-                    color: #333;
-                    padding: 20px;
-                }}
-                .container {{
-                    max-width: 1200px;
-                    margin: 0 auto;
-                    background: rgba(255, 255, 255, 0.95);
-                    border-radius: 15px;
-                    padding: 30px;
-                    box-shadow: 0 20px 40px rgba(0,0,0,0.1);
-                }}
-                header {{
-                    text-align: center;
-                    margin-bottom: 40px;
-                    padding-bottom: 20px;
-                    border-bottom: 3px solid #667eea;
-                }}
-                h1 {{
-                    color: #4a5568;
-                    font-size: 2.8em;
-                    margin-bottom: 10px;
-                }}
-                .subtitle {{
-                    color: #718096;
-                    font-size: 1.2em;
-                }}
-                .info-box {{
-                    background: #f7fafc;
-                    padding: 20px;
-                    border-radius: 10px;
-                    margin-bottom: 30px;
-                    border-left: 5px solid #4299e1;
-                }}
-                .grid {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-                    gap: 20px;
-                    margin-bottom: 30px;
-                }}
-                .card {{
-                    background: white;
-                    padding: 25px;
-                    border-radius: 10px;
-                    box-shadow: 0 5px 15px rgba(0,0,0,0.05);
-                    transition: transform 0.3s ease;
-                }}
-                .card:hover {{ transform: translateY(-5px); }}
-                .card h3 {{
-                    color: #4a5568;
-                    margin-bottom: 15px;
-                    display: flex;
-                    align-items: center;
-                    gap: 10px;
-                }}
-                .stat-grid {{
-                    display: grid;
-                    grid-template-columns: repeat(2, 1fr);
-                    gap: 15px;
-                }}
-                .stat-item {{
-                    text-align: center;
-                    padding: 15px;
-                    background: #edf2f7;
-                    border-radius: 8px;
-                }}
-                .stat-number {{
-                    font-size: 2em;
-                    font-weight: bold;
-                    color: #4299e1;
-                }}
-                .btn {{
-                    display: inline-block;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    color: white;
-                    padding: 12px 25px;
-                    border-radius: 8px;
-                    text-decoration: none;
-                    font-weight: bold;
-                    border: none;
-                    cursor: pointer;
-                    transition: all 0.3s ease;
-                }}
-                .btn:hover {{
-                    transform: translateY(-2px);
-                    box-shadow: 0 7px 20px rgba(0,0,0,0.15);
-                }}
-                .worker-list, .task-list {{
-                    list-style: none;
-                }}
-                .worker-item, .task-item {{
-                    padding: 15px;
-                    margin: 10px 0;
-                    background: #f7fafc;
-                    border-radius: 8px;
-                    border-left: 4px solid #4299e1;
-                }}
-                .task-item.completed {{ border-left-color: #48bb78; }}
-                .task-item.running {{ border-left-color: #ed8936; }}
-                .task-item.failed {{ border-left-color: #f56565; }}
-                .status {{
-                    display: inline-block;
-                    padding: 4px 12px;
-                    border-radius: 20px;
-                    font-size: 0.9em;
-                    font-weight: bold;
-                    margin-left: 10px;
-                }}
-                .status-connected {{ background: #c6f6d5; color: #22543d; }}
-                .status-disconnected {{ background: #fed7d7; color: #c53030; }}
-                .status-pending {{ background: #feebc8; color: #b7791f; }}
-                .refresh-btn {{
-                    background: none;
-                    border: none;
-                    color: #667eea;
-                    cursor: pointer;
-                    font-size: 1.2em;
-                    float: right;
-                }}
-                code {{
-                    background: #2d3748;
-                    color: #e2e8f0;
-                    padding: 10px 15px;
-                    border-radius: 6px;
-                    display: block;
-                    margin: 10px 0;
-                    font-family: 'Courier New', monospace;
-                }}
-                @media (max-width: 768px) {{
-                    .container {{ padding: 15px; }}
-                    h1 {{ font-size: 2em; }}
-                    .grid {{ grid-template-columns: 1fr; }}
-                }}
+                body {{ font-family: Arial, sans-serif; margin: 40px; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                          color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }}
+                .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }}
+                .card {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }}
+                .stat {{ font-size: 2em; font-weight: bold; color: #667eea; }}
+                .btn {{ background: #667eea; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }}
+                .api-info {{ background: #f5f5f5; padding: 20px; border-radius: 10px; margin-top: 30px; }}
+                code {{ background: #eee; padding: 2px 5px; border-radius: 3px; }}
             </style>
         </head>
         <body>
             <div class="container">
-                <header>
-                    <h1>🤖 AI Network</h1>
-                    <p class="subtitle">Децентрализованные вычисления в реальном времени</p>
-                </header>
-                
-                <div class="info-box">
-                    <h3>📡 Информация о сервера</h3>
-                    <p><strong>Адрес сервера:</strong> {self.public_host}</p>
-                    <p><strong>Порт для рабочих:</strong> {self.worker_port}</p>
-                    <p><strong>Веб-порт:</strong> {self.web_port}</p>
-                    <p><strong>Время запуска:</strong> <span id="uptime">только что</span></p>
+                <div class="header">
+                    <h1>🤖 AI Network Coordinator</h1>
+                    <p>Децентрализованная сеть распределенных вычислений</p>
                 </div>
                 
-                <div class="grid">
+                <div class="cards">
                     <div class="card">
-                        <h3>📊 Статистика сети</h3>
-                        <div class="stat-grid" id="stats">
-                            <!-- Динамически заполняется JavaScript -->
-                        </div>
-                        <button class="refresh-btn" onclick="loadStats()">🔄</button>
+                        <h3>🌐 Сеть</h3>
+                        <p>Публичный адрес: <code>{self.public_host}</code></p>
+                        <p>Порт рабочих: <code>{self.worker_port}</code></p>
+                        <p>Веб-порт: <code>{self.web_port}</code></p>
                     </div>
                     
                     <div class="card">
-                        <h3>👷 Рабочие узлы</h3>
-                        <div id="workers-container">
-                            <p>Загрузка...</p>
-                        </div>
-                        <button class="refresh-btn" onclick="loadWorkers()">🔄</button>
+                        <h3>📊 Статистика</h3>
+                        <div class="stat" id="workersCount">0</div>
+                        <p>Активных рабочих</p>
+                        <div class="stat" id="tasksCount">0</div>
+                        <p>Всего задач</p>
+                    </div>
+                    
+                    <div class="card">
+                        <h3>🔧 Управление</h3>
+                        <button class="btn" onclick="loadStats()">Обновить</button>
+                        <button class="btn" onclick="testAPI()">Тест API</button>
+                        <button class="btn" onclick="createTestTask()">Тест задача</button>
                     </div>
                 </div>
                 
-                <div class="card">
-                    <h3>📤 Отправить задачу</h3>
-                    <form onsubmit="submitTask(event)">
-                        <div style="margin-bottom: 15px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: bold;">Тип задачи:</label>
-                            <select id="taskType" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                                <option value="matrix_mult">Умножение матриц</option>
-                                <option value="calculation">Математические вычисления</option>
-                                <option value="nn_inference">Инференс нейросети</option>
-                            </select>
-                        </div>
-                        <div style="margin-bottom: 20px;">
-                            <label style="display: block; margin-bottom: 5px; font-weight: bold;">Параметры (JSON):</label>
-                            <textarea id="taskData" style="width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #e2e8f0; height: 80px;" 
-                                      placeholder='{{"size": 10}}'></textarea>
-                        </div>
-                        <button type="submit" class="btn">🚀 Отправить задачу</button>
-                    </form>
-                </div>
-                
-                <div class="card">
-                    <h3>📋 Активные задачи</h3>
-                    <div id="tasks-container">
-                        <p>Загрузка...</p>
-                    </div>
-                    <button class="refresh-btn" onclick="loadTasks()">🔄</button>
-                </div>
-                
-                <div class="card">
-                    <h3>🔗 Как подключиться</h3>
-                    <p>Для подключения рабочего узла выполните:</p>
-                    <code>python ai_network.py --worker --host {self.public_host} --port {self.worker_port} --name "Ваш_компьютер"</code>
-                    <p>Или используйте упрощенный скрипт:</p>
-                    <code id="connect-command">python -c "import socket;s=socket.socket();s.connect(('{self.public_host}',{self.worker_port}));print('✅ Подключено!')"</code>
+                <div class="api-info">
+                    <h3>📡 API Endpoints</h3>
+                    <p><code>GET /api/status</code> - Статус координатора</p>
+                    <p><code>GET /api/stats</code> - Статистика сети</p>
+                    <p><code>GET /api/tasks</code> - Список задач</p>
+                    <p><code>GET /api/workers</code> - Список рабочих</p>
+                    <p><code>POST /api/submit</code> - Отправить задачу</p>
+                    <p><code>GET /api/health</code> - Проверка здоровья</p>
+                    <p><code>GET /api/test</code> - Тест CORS</p>
+                    
+                    <h3 style="margin-top: 20px;">🔗 Публичный фронтенд</h3>
+                    <p>Используйте этот API для создания публичного интерфейса.</p>
+                    <p>Пример запроса: <code>fetch('http://{self.public_host}:{self.web_port}/api/stats')</code></p>
                 </div>
             </div>
             
             <script>
-                const API_BASE = window.location.origin;
-                
                 async function loadStats() {{
                     try {{
-                        const response = await fetch(API_BASE + '/api/stats');
+                        const response = await fetch('/api/stats');
                         const data = await response.json();
-                        
-                        document.getElementById('stats').innerHTML = `
-                            <div class="stat-item">
-                                <div class="stat-number">${{data.workers_count}}</div>
-                                <div>Рабочих узлов</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-number">${{data.tasks_pending}}</div>
-                                <div>В очереди</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-number">${{data.tasks_running}}</div>
-                                <div>Выполняется</div>
-                            </div>
-                            <div class="stat-item">
-                                <div class="stat-number">${{data.tasks_completed}}</div>
-                                <div>Завершено</div>
-                            </div>
-                        `;
+                        document.getElementById('workersCount').textContent = data.workers_count || 0;
+                        document.getElementById('tasksCount').textContent = data.tasks_total || 0;
+                        alert('Статистика обновлена!');
                     }} catch (error) {{
-                        console.error('Ошибка загрузки статистики:', error);
+                        alert('Ошибка: ' + error.message);
                     }}
                 }}
                 
-                async function loadWorkers() {{
+                async function testAPI() {{
                     try {{
-                        const response = await fetch(API_BASE + '/api/workers');
+                        const response = await fetch('/api/test');
                         const data = await response.json();
-                        
-                        const container = document.getElementById('workers-container');
-                        if (data.workers && data.workers.length > 0) {{
-                            container.innerHTML = data.workers.map(worker => `
-                                <div class="worker-item">
-                                    <strong>${{worker.name}}</strong>
-                                    <span class="status status-${{worker.status === 'connected' ? 'connected' : 'disconnected'}}">
-                                        ${{worker.status === 'connected' ? '✅ Подключен' : '❌ Отключен'}}
-                                    </span>
-                                    <div style="margin-top: 5px; font-size: 0.9em; color: #718096;">
-                                        ${{worker.address}} • Задача: ${{worker.current_task || 'нет'}}
-                                    </div>
-                                </div>
-                            `).join('');
-                        }} else {{
-                            container.innerHTML = '<p>Нет подключенных рабочих узлов</p>';
-                        }}
+                        alert('API работает: ' + data.message);
                     }} catch (error) {{
-                        console.error('Ошибка загрузки рабочих:', error);
+                        alert('Ошибка API: ' + error.message);
                     }}
                 }}
                 
-                async function loadTasks() {{
+                async function createTestTask() {{
                     try {{
-                        const response = await fetch(API_BASE + '/api/tasks');
-                        const data = await response.json();
-                        
-                        const container = document.getElementById('tasks-container');
-                        if (data.tasks && data.tasks.length > 0) {{
-                            container.innerHTML = data.tasks.slice(-10).reverse().map(task => `
-                                <div class="task-item ${{task.status}}">
-                                    <strong>${{task.id?.slice(0, 8) || 'unknown'}}</strong>
-                                    <span class="status status-${{task.status}}">
-                                        ${{task.status === 'completed' ? '✅' : 
-                                           task.status === 'running' ? '⚡' : 
-                                           task.status === 'failed' ? '❌' : '⏳'}}
-                                        ${{task.status}}
-                                    </span>
-                                    <div style="margin-top: 5px; font-size: 0.9em;">
-                                        Тип: ${{task.type}} • Рабочий: ${{task.worker || 'не назначен'}}
-                                    </div>
-                                </div>
-                            `).join('');
-                        }} else {{
-                            container.innerHTML = '<p>Нет активных задач</p>';
-                        }}
-                    }} catch (error) {{
-                        console.error('Ошибка загрузки задач:', error);
-                    }}
-                }}
-                
-                async function submitTask(event) {{
-                    event.preventDefault();
-                    
-                    const taskType = document.getElementById('taskType').value;
-                    let taskData = {{}};
-                    
-                    try {{
-                        const dataInput = document.getElementById('taskData').value;
-                        taskData = dataInput ? JSON.parse(dataInput) : {{}};
-                    }} catch (e) {{
-                        alert('Ошибка в JSON данных задачи');
-                        return;
-                    }}
-                    
-                    try {{
-                        const response = await fetch(API_BASE + '/api/submit', {{
+                        const response = await fetch('/api/submit', {{
                             method: 'POST',
                             headers: {{ 'Content-Type': 'application/json' }},
                             body: JSON.stringify({{
-                                type: taskType,
-                                data: taskData
+                                type: 'matrix_mult',
+                                data: {{ size: 5 }}
                             }})
                         }});
-                        
-                        const result = await response.json();
-                        
-                        if (result.status === 'success') {{
-                            alert(`✅ Задача отправлена! ID: ${{result.task_id}}`);
-                            loadStats();
-                            loadTasks();
-                        }} else {{
-                            alert(`❌ Ошибка: ${{result.message}}`);
-                        }}
+                        const data = await response.json();
+                        alert('Задача создана: ' + data.task_id);
                     }} catch (error) {{
-                        alert('Ошибка подключения к серверу');
+                        alert('Ошибка: ' + error.message);
                     }}
                 }}
                 
-                // Автообновление
-                setInterval(() => {{
-                    loadStats();
-                    loadWorkers();
-                    loadTasks();
-                }}, 3000);
-                
-                // Первоначальная загрузка
-                document.addEventListener('DOMContentLoaded', () => {{
-                    loadStats();
-                    loadWorkers();
-                    loadTasks();
-                    
-                    // Обновляем uptime
-                    const startTime = Date.now();
-                    function updateUptime() {{
-                        const uptime = Date.now() - startTime;
-                        const hours = Math.floor(uptime / 3600000);
-                        const minutes = Math.floor((uptime % 3600000) / 60000);
-                        const seconds = Math.floor((uptime % 60000) / 1000);
-                        document.getElementById('uptime').textContent = 
-                            `${{hours.toString().padStart(2, '0')}}:${{minutes.toString().padStart(2, '0')}}:${{seconds.toString().padStart(2, '0')}}`;
-                    }}
-                    setInterval(updateUptime, 1000);
-                    updateUptime();
-                }});
+                // Загружаем статистику при старте
+                loadStats();
             </script>
         </body>
         </html>
@@ -689,17 +509,22 @@ class NetworkCoordinator:
             tasks_pending = len([t for t in self.tasks.values() if t.get('status') == 'pending'])
             tasks_running = len([t for t in self.tasks.values() if t.get('status') == 'running'])
             tasks_completed = len([t for t in self.tasks.values() if t.get('status') == 'completed'])
+            tasks_failed = len([t for t in self.tasks.values() if t.get('status') == 'failed'])
             
             connected_workers = len([w for w in self.workers.values() if w.get('status') == 'connected'])
             
             return {
                 'workers_count': connected_workers,
+                'total_workers': len(self.workers),
                 'tasks_total': len(self.tasks),
                 'tasks_pending': tasks_pending,
                 'tasks_running': tasks_running,
                 'tasks_completed': tasks_completed,
+                'tasks_failed': tasks_failed,
                 'queue_length': len(self.task_queue),
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'coordinator_uptime': time.time() - getattr(self, 'start_time', time.time()),
+                'public_host': self.public_host
             }
     
     def _create_task(self, task_type: str, task_data: Dict) -> str:
@@ -714,7 +539,8 @@ class NetworkCoordinator:
                 'status': 'pending',
                 'created': time.time(),
                 'worker': None,
-                'result': None
+                'result': None,
+                'updated': time.time()
             }
             self.task_queue.append(task_id)
         
@@ -752,6 +578,7 @@ class NetworkCoordinator:
                     if self._send_task_to_worker(worker_id, task_id, task):
                         task['status'] = 'running'
                         task['worker'] = worker_id
+                        task['started'] = time.time()
                         
                         self.workers[worker_id]['current_task'] = task_id
                         
@@ -787,7 +614,7 @@ class NetworkCoordinator:
             return False
     
     def _handle_worker_connection(self, conn: socket.socket, addr: tuple):
-        """Обработка подключения рабочего - ИСПРАВЛЕНО: не завершаем после регистрации"""
+        """Обработка подключения рабочего"""
         worker_id = f"{addr[0]}:{addr[1]}-{int(time.time())}"
         
         logger.info(f"Новое подключение рабочего: {worker_id}")
@@ -801,7 +628,8 @@ class NetworkCoordinator:
                 'status': 'connected',
                 'last_seen': time.time(),
                 'current_task': None,
-                'capabilities': {}
+                'capabilities': {},
+                'connected_at': time.time()
             }
         
         try:
@@ -813,7 +641,8 @@ class NetworkCoordinator:
                 'type': 'welcome',
                 'worker_id': worker_id,
                 'message': 'Добро пожаловать в AI Network!',
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'coordinator': self.public_host
             }
             welcome_json = json.dumps(welcome_msg)
             conn.sendall(welcome_json.encode())
@@ -991,10 +820,12 @@ class NetworkCoordinator:
                         if result.get('status') == 'success':
                             self.tasks[task_id]['status'] = 'completed'
                             self.tasks[task_id]['result'] = result
+                            self.tasks[task_id]['completed'] = time.time()
                             logger.info(f"Задача {task_id} успешно выполнена")
                         else:
                             self.tasks[task_id]['status'] = 'failed'
                             self.tasks[task_id]['result'] = result
+                            self.tasks[task_id]['failed'] = time.time()
                             logger.warning(f"Задача {task_id} завершилась с ошибкой")
                 
                 # Пробуем назначить следующую задачу
@@ -1109,6 +940,7 @@ class NetworkCoordinator:
         logger.info(f"🌐 Веб-интерфейс: http://{self.public_host}:{self.web_port}")
         logger.info(f"📡 Порт для рабочих: {self.worker_port}")
         logger.info(f"🔗 Адрес для подключения: {self.public_host}:{self.worker_port}")
+        logger.info(f"✅ CORS: {'Enabled' if CORS_AVAILABLE else 'Manual headers'}")
         logger.info("=" * 60)
         
         # Запускаем сервер для рабочих
@@ -1244,7 +1076,8 @@ class WorkerNode:
                         'cpu_cores': os.cpu_count() or 1,
                         'platform': sys.platform,
                         'python_version': sys.version.split()[0],
-                        'supported_tasks': ['matrix_mult', 'calculation', 'nn_inference']
+                        'supported_tasks': ['matrix_mult', 'calculation', 'nn_inference'],
+                        'performance_score': random.randint(50, 100)
                     }
                 }
                 
@@ -1273,7 +1106,8 @@ class WorkerNode:
             heartbeat = {
                 'type': 'heartbeat',
                 'worker_id': self.worker_id,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'name': self.name
             }
             heartbeat_json = json.dumps(heartbeat)
             sock.sendall(heartbeat_json.encode())
@@ -1303,25 +1137,30 @@ class WorkerNode:
                     'matrix_size': size,
                     'execution_time': round(execution_time, 3),
                     'worker': self.name,
+                    'worker_id': self.worker_id,
                     'checksum': hashlib.md5(str(result).encode()).hexdigest()[:8],
-                    'timestamp': time.time()
+                    'timestamp': time.time(),
+                    'performance': f"{round(1/execution_time if execution_time > 0 else 0, 1)} ops/sec"
                 }
             
             elif task_type == 'calculation':
                 # Простые вычисления
-                numbers = task_data.get('numbers', [random.random() for _ in range(100)])
-                
+                numbers = task_data.get('numbers', 1000)
                 operations = task_data.get('operations', ['sum', 'average', 'min', 'max'])
+                
+                # Генерируем случайные числа
+                random_numbers = [random.random() for _ in range(numbers)]
+                
                 results = {}
                 
                 if 'sum' in operations:
-                    results['sum'] = sum(numbers)
+                    results['sum'] = sum(random_numbers)
                 if 'average' in operations:
-                    results['average'] = sum(numbers) / len(numbers)
+                    results['average'] = sum(random_numbers) / len(random_numbers)
                 if 'min' in operations:
-                    results['min'] = min(numbers)
+                    results['min'] = min(random_numbers)
                 if 'max' in operations:
-                    results['max'] = max(numbers)
+                    results['max'] = max(random_numbers)
                 
                 execution_time = time.time() - start_time
                 
@@ -1329,14 +1168,15 @@ class WorkerNode:
                     'status': 'success',
                     'task_type': task_type,
                     'results': results,
-                    'numbers_count': len(numbers),
+                    'numbers_count': len(random_numbers),
                     'execution_time': round(execution_time, 3),
                     'worker': self.name,
+                    'worker_id': self.worker_id,
                     'timestamp': time.time()
                 }
             
             elif task_type == 'nn_inference':
-                input_size = task_data.get('input_size', 5)
+                input_size = task_data.get('input_size', 10)
                 inputs = [random.random() for _ in range(input_size)]
                 
                 # Создаем и запускаем нейросеть
@@ -1352,6 +1192,7 @@ class WorkerNode:
                     'outputs': [round(x, 4) for x in outputs],
                     'execution_time': round(execution_time, 3),
                     'worker': self.name,
+                    'worker_id': self.worker_id,
                     'timestamp': time.time()
                 }
             
@@ -1360,6 +1201,7 @@ class WorkerNode:
                     'status': 'error',
                     'message': f'Неизвестный тип задачи: {task_type}',
                     'worker': self.name,
+                    'worker_id': self.worker_id,
                     'timestamp': time.time()
                 }
                 
@@ -1367,7 +1209,9 @@ class WorkerNode:
             return {
                 'status': 'error',
                 'message': str(e),
+                'error_type': type(e).__name__,
                 'worker': self.name,
+                'worker_id': self.worker_id,
                 'timestamp': time.time()
             }
     
@@ -1556,6 +1400,8 @@ def main():
                        help='Порт веб-интерфейса (по умолчанию: 8890)')
     parser.add_argument('--name', 
                        help='Имя рабочего узла')
+    parser.add_argument('--public-host', default=None,
+                       help='Публичный хост (автоматически определяется)')
     
     args = parser.parse_args()
     
@@ -1582,7 +1428,7 @@ def main():
     
     else:
         print("=" * 70)
-        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ")
+        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ v1.0")
         print("=" * 70)
         print()
         print("КОМАНДЫ:")
@@ -1598,6 +1444,11 @@ def main():
         print()
         print("  3. Указать свой хост:")
         print("     python ai_network.py --coordinator --host 0.0.0.0")
+        print()
+        print("📡 Публичный API:")
+        print(f"    • Статус: GET http://185.185.142.113:8890/api/status")
+        print(f"    • Задачи: GET http://185.185.142.113:8890/api/tasks")
+        print(f"    • Отправить: POST http://185.185.142.113:8890/api/submit")
         print("=" * 70)
         
         choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, Enter - выход): ")
