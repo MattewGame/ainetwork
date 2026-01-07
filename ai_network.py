@@ -183,13 +183,36 @@ class NetworkUtils:
     @staticmethod
     def create_socket() -> socket.socket:
         """Создать сокет с правильными настройками"""
-        sock = socket.socket(socket.AF_INET6 if socket.has_ipv6 else socket.AF_INET, 
-                           socket.SOCK_STREAM)
+        try:
+            # Сначала пытаемся создать сокет, поддерживающий IPv6
+            if socket.has_ipv6:
+                sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                # Включаем поддержку IPv4 через IPv6
+                sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                return sock
+        except:
+            pass
+        
+        # Если IPv6 не поддерживается или произошла ошибка, используем IPv4
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if socket.has_ipv6:
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)  # Принимать и IPv4, и IPv6
-        sock.settimeout(10)
         return sock
+    
+    @staticmethod
+    def is_valid_ip(ip: str) -> bool:
+        """Проверить, является ли строка валидным IP-адресом"""
+        try:
+            # Проверка IPv4
+            socket.inet_pton(socket.AF_INET, ip)
+            return True
+        except socket.error:
+            try:
+                # Проверка IPv6
+                socket.inet_pton(socket.AF_INET6, ip)
+                return True
+            except socket.error:
+                return False
 
 # ========== КООРДИНАТОР СЕТИ ==========
 class NetworkCoordinator:
@@ -197,9 +220,16 @@ class NetworkCoordinator:
     
     def __init__(self, host: str = None, worker_port: int = 8888, web_port: int = 8890):
         # Автоматически определяем лучший хост если не указан
-        self.host = host if host else NetworkUtils.get_best_public_ip()
+        if host is None or host == "":
+            self.host = "0.0.0.0"  # Слушаем все интерфейсы
+        else:
+            self.host = host
+        
         self.worker_port = worker_port
         self.web_port = web_port
+        
+        # Определяем публичный IP для отображения в интерфейсе
+        self.public_host = NetworkUtils.get_best_public_ip()
         
         # Данные сети
         self.workers: Dict[str, Dict] = {}
@@ -214,7 +244,7 @@ class NetworkCoordinator:
         self.app = Flask(__name__)
         self._setup_web_routes()
         
-        logger.info(f"Инициализация координатора на {self.host}")
+        logger.info(f"Инициализация координатора на {self.host}:{self.worker_port}")
     
     def _setup_web_routes(self):
         """Настройка маршрутов веб-сервера"""
@@ -228,7 +258,7 @@ class NetworkCoordinator:
             return jsonify({
                 'status': 'running',
                 'coordinator': {
-                    'host': self.host,
+                    'host': self.public_host,
                     'worker_port': self.worker_port,
                     'web_port': self.web_port,
                     'uptime': getattr(self, 'start_time', time.time())
@@ -443,7 +473,7 @@ class NetworkCoordinator:
                 
                 <div class="info-box">
                     <h3>📡 Информация о сервере</h3>
-                    <p><strong>Адрес сервера:</strong> {self.host}</p>
+                    <p><strong>Адрес сервера:</strong> {self.public_host}</p>
                     <p><strong>Порт для рабочих:</strong> {self.worker_port}</p>
                     <p><strong>Веб-порт:</strong> {self.web_port}</p>
                     <p><strong>Время запуска:</strong> <span id="uptime">только что</span></p>
@@ -498,9 +528,9 @@ class NetworkCoordinator:
                 <div class="card">
                     <h3>🔗 Как подключиться</h3>
                     <p>Для подключения рабочего узла выполните:</p>
-                    <code>python ai_network.py --worker --host {self.host} --port {self.worker_port} --name "Ваш_компьютер"</code>
+                    <code>python ai_network.py --worker --host {self.public_host} --port {self.worker_port} --name "Ваш_компьютер"</code>
                     <p>Или используйте упрощенный скрипт:</p>
-                    <code id="connect-command">python -c "import socket;s=socket.socket();s.connect(('{self.host}',{self.worker_port}));print('✅ Подключено!')"</code>
+                    <code id="connect-command">python -c "import socket;s=socket.socket();s.connect(('{self.public_host}',{self.worker_port}));print('✅ Подключено!')"</code>
                 </div>
             </div>
             
@@ -919,10 +949,25 @@ class NetworkCoordinator:
         """Запуск сервера для рабочих"""
         try:
             server = NetworkUtils.create_socket()
-            server.bind((self.host, self.worker_port))
-            server.listen(10)
             
-            logger.info(f"Сервер для рабочих запущен на {self.host}:{self.worker_port}")
+            # Для привязки используем 0.0.0.0 для IPv4 или :: для IPv6
+            bind_host = self.host
+            if bind_host == "0.0.0.0":
+                # Пытаемся привязаться ко всем интерфейсам
+                try:
+                    server.bind(("::", self.worker_port))
+                    logger.info(f"Сервер привязан к [::]:{self.worker_port} (IPv6)")
+                except:
+                    server.bind((bind_host, self.worker_port))
+                    logger.info(f"Сервер привязан к {bind_host}:{self.worker_port} (IPv4)")
+            else:
+                server.bind((bind_host, self.worker_port))
+                logger.info(f"Сервер привязан к {bind_host}:{self.worker_port}")
+            
+            server.listen(10)
+            server.settimeout(1)  # Таймаут для accept
+            
+            logger.info(f"Сервер для рабочих запущен на {self.public_host}:{self.worker_port}")
             
             while self.running:
                 try:
@@ -945,6 +990,8 @@ class NetworkCoordinator:
         
         except Exception as e:
             logger.error(f"Ошибка запуска сервера: {e}")
+            import traceback
+            traceback.print_exc()
             self.running = False
     
     def start(self):
@@ -955,9 +1002,9 @@ class NetworkCoordinator:
         logger.info("=" * 60)
         logger.info("🚀 ЗАПУСК AI NETWORK COORDINATOR")
         logger.info("=" * 60)
-        logger.info(f"🌐 Веб-интерфейс: http://{self.host}:{self.web_port}")
+        logger.info(f"🌐 Веб-интерфейс: http://{self.public_host}:{self.web_port}")
         logger.info(f"📡 Порт для рабочих: {self.worker_port}")
-        logger.info(f"🔗 Адрес для подключения: {self.host}:{self.worker_port}")
+        logger.info(f"🔗 Адрес для подключения: {self.public_host}:{self.worker_port}")
         logger.info("=" * 60)
         
         # Запускаем сервер для рабочих
@@ -973,6 +1020,9 @@ class NetworkCoordinator:
         task_processor_thread.start()
         
         try:
+            # Даем время серверу запуститься
+            time.sleep(1)
+            
             # Запускаем веб-сервер
             import warnings
             warnings.filterwarnings("ignore", message=".*Werkzeug.*")
@@ -1019,10 +1069,13 @@ class WorkerNode:
     def connect(self) -> Optional[socket.socket]:
         """Подключиться к координатору"""
         try:
-            sock = NetworkUtils.create_socket()
+            # Создаем сокет для подключения
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10)
             
             logger.info(f"Подключение к {self.server_host}:{self.server_port}...")
+            
+            # Пробуем подключиться
             sock.connect((self.server_host, self.server_port))
             
             # Устанавливаем таймаут после подключения
@@ -1053,6 +1106,8 @@ class WorkerNode:
                     logger.info(f"🆔 Ваш ID: {self.worker_id}")
                     self.connected = True
                     return sock
+                else:
+                    logger.error(f"Неожиданный ответ сервера: {response}")
             
             return None
             
@@ -1060,7 +1115,10 @@ class WorkerNode:
             logger.error("Таймаут подключения")
             return None
         except ConnectionRefusedError:
-            logger.error("Не удалось подключиться. Проверьте адрес сервера.")
+            logger.error("Не удалось подключиться. Проверьте адрес сервера и порт.")
+            return None
+        except socket.gaierror as e:
+            logger.error(f"Ошибка разрешения адреса {self.server_host}: {e}")
             return None
         except Exception as e:
             logger.error(f"Ошибка подключения: {e}")
@@ -1225,7 +1283,10 @@ class WorkerNode:
                                     }
                                     
                                     sock.sendall(json.dumps(response).encode())
-                                    logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
+                                    if result['status'] == 'success':
+                                        logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
+                                    else:
+                                        logger.warning(f"❌ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
                                     
                                 elif message.get('type') == 'heartbeat_ack':
                                     # Подтверждение heartbeat
@@ -1326,7 +1387,7 @@ def main():
         choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, Enter - выход): ")
         
         if choice == '1':
-            host = input(f"Хост координатора [{NetworkUtils.get_best_public_ip()}]: ") or NetworkUtils.get_best_public_ip()
+            host = input(f"Хост координатора [0.0.0.0]: ") or "0.0.0.0"
             port = input("Порт для рабочих [8888]: ") or "8888"
             web_port = input("Порт веб-интерфейса [8890]: ") or "8890"
             
