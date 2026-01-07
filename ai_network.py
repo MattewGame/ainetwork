@@ -2,7 +2,7 @@
 """
 🚀 Децентрализованная AI сеть MVP - Универсальная версия
 Поддержка IPv4/IPv6, автоматическое определение адресов
-Улучшенная обработка ошибок подключения
+Исправленная версия с правильной обработкой JSON
 """
 
 import socket
@@ -17,7 +17,6 @@ import argparse
 import os
 import sys
 import uuid
-from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 # Веб-интерфейс
@@ -205,7 +204,7 @@ class NetworkUtils:
         """Создать сокет для клиента с улучшенными настройками"""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Отключаем алгоритм Нейгла
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return sock
 
 # ========== КООРДИНАТОР СЕТИ ==========
@@ -215,7 +214,7 @@ class NetworkCoordinator:
     def __init__(self, host: str = None, worker_port: int = 8888, web_port: int = 8890):
         # Автоматически определяем лучший хост если не указан
         if host is None or host == "":
-            self.host = "0.0.0.0"  # Слушаем все интерфейсы
+            self.host = "0.0.0.0"
         else:
             self.host = host
         
@@ -788,7 +787,7 @@ class NetworkCoordinator:
             return False
     
     def _handle_worker_connection(self, conn: socket.socket, addr: tuple):
-        """Обработка подключения рабочего"""
+        """Обработка подключения рабочего - УЛУЧШЕННАЯ версия"""
         worker_id = f"{addr[0]}:{addr[1]}-{int(time.time())}"
         
         logger.info(f"Новое подключение рабочего: {worker_id}")
@@ -809,14 +808,71 @@ class NetworkCoordinator:
             # Устанавливаем таймаут
             conn.settimeout(30)
             
-            # Отправляем приветственное сообщение
+            # ИСПРАВЛЕНО: СРАЗУ отправляем приветственное сообщение
             welcome_msg = {
                 'type': 'welcome',
                 'worker_id': worker_id,
                 'message': 'Добро пожаловать в AI Network!',
                 'timestamp': time.time()
             }
-            conn.sendall(json.dumps(welcome_msg).encode())
+            welcome_json = json.dumps(welcome_msg)
+            conn.sendall(welcome_json.encode())
+            logger.info(f"Отправлено приветствие рабочему {worker_id}")
+            
+            # Теперь ждем регистрацию от рабочего с таймаутом
+            conn.settimeout(10)
+            try:
+                data = conn.recv(4096)
+                if data:
+                    # ОТЛАДОЧНАЯ ИНФОРМАЦИЯ: что мы получили
+                    raw_data = data.decode('utf-8', errors='ignore')
+                    logger.debug(f"Получены данные от рабочего {worker_id}: '{raw_data}'")
+                    
+                    # Пробуем найти JSON в данных (может быть мусор в начале/конце)
+                    try:
+                        # Пытаемся распарсить сразу
+                        message = json.loads(raw_data.strip())
+                        
+                        if message.get('type') == 'capabilities':
+                            # Сохраняем возможности рабочего
+                            with self.lock:
+                                if worker_id in self.workers:
+                                    self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
+                                    self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
+                                    logger.info(f"Рабочий {worker_id} зарегистрирован как '{self.workers[worker_id]['name']}'")
+                        else:
+                            logger.warning(f"Неожиданное сообщение при регистрации от {worker_id}: {message.get('type')}")
+                    except json.JSONDecodeError as e:
+                        # Пробуем найти JSON в строке
+                        logger.debug(f"Прямой парсинг не удался: {e}")
+                        
+                        # Ищем открывающую и закрывающую скобки
+                        start_idx = raw_data.find('{')
+                        end_idx = raw_data.rfind('}')
+                        
+                        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                            json_str = raw_data[start_idx:end_idx+1]
+                            try:
+                                message = json.loads(json_str)
+                                
+                                if message.get('type') == 'capabilities':
+                                    # Сохраняем возможности рабочего
+                                    with self.lock:
+                                        if worker_id in self.workers:
+                                            self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
+                                            self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
+                                            logger.info(f"Рабочий {worker_id} зарегистрирован (исправлен JSON) как '{self.workers[worker_id]['name']}'")
+                                else:
+                                    logger.warning(f"Неожиданное сообщение (исправленный JSON) от {worker_id}: {message.get('type')}")
+                            except json.JSONDecodeError as e2:
+                                logger.error(f"Не удалось распарсить JSON от рабочего {worker_id}: {e2}")
+                                logger.error(f"Сырые данные: {repr(raw_data)}")
+            except socket.timeout:
+                logger.warning(f"Таймаут ожидания регистрации от рабочего {worker_id}")
+                # Продолжаем, возможно worker отправит данные позже
+            
+            # Возвращаем обычный таймаут
+            conn.settimeout(30)
             
             # Основной цикл обработки
             while self.running:
@@ -829,7 +885,8 @@ class NetworkCoordinator:
                         break
                     
                     try:
-                        message = json.loads(data.decode('utf-8'))
+                        raw_data = data.decode('utf-8', errors='ignore')
+                        message = json.loads(raw_data.strip())
                         
                         if message.get('type') == 'heartbeat':
                             # Обновляем время последней активности
@@ -842,11 +899,12 @@ class NetworkCoordinator:
                             conn.sendall(json.dumps(ack).encode())
                             
                         elif message.get('type') == 'capabilities':
-                            # Сохраняем возможности рабочего
+                            # Обновляем возможности (может прийти позже)
                             with self.lock:
                                 if worker_id in self.workers:
                                     self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
                                     self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
+                                    logger.info(f"Обновлены данные рабочего {worker_id}: {self.workers[worker_id]['name']}")
                             
                         elif message.get('type') == 'result':
                             # Обработка результата задачи
@@ -870,8 +928,9 @@ class NetworkCoordinator:
                             # Пробуем назначить следующую задачу
                             self._assign_tasks()
                             
-                    except json.JSONDecodeError:
-                        logger.warning(f"Некорректный JSON от рабочего {worker_id}")
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Некорректный JSON от рабочего {worker_id}: {e}")
+                        logger.debug(f"Сырые данные: {repr(data.decode('utf-8', errors='ignore'))}")
                     
                 except socket.timeout:
                     # Таймаут - нормальная ситуация
@@ -1061,81 +1120,92 @@ class WorkerNode:
         self.worker_id = None
         self.connection_attempts = 0
         self.max_connection_attempts = 10
-        self.reconnect_delay = 5  # начальная задержка переподключения
+        self.reconnect_delay = 5
     
     def safe_connect(self) -> Optional[socket.socket]:
-        """Безопасное подключение с улучшенной обработкой ошибок"""
+        """Безопасное подключение"""
         try:
-            # Создаем сокет с улучшенными настройками
             sock = NetworkUtils.create_client_socket()
-            
-            # Устанавливаем таймаут подключения
-            sock.settimeout(15)  # Увеличиваем таймаут до 15 секунд
+            sock.settimeout(15)
             
             logger.info(f"Подключение к {self.server_host}:{self.server_port}...")
-            
-            # Пробуем подключиться
             sock.connect((self.server_host, self.server_port))
             
-            # После успешного подключения увеличиваем таймаут
             sock.settimeout(30)
-            
             logger.info(f"✅ Успешно подключено к {self.server_host}:{self.server_port}")
             return sock
             
         except socket.timeout:
-            logger.error("⚠️ Таймаут подключения. Проверьте доступность сервера.")
+            logger.error("⚠️ Таймаут подключения")
             return None
         except ConnectionRefusedError:
-            logger.error("❌ Сервер отказал в подключении. Убедитесь, что координатор запущен.")
+            logger.error("❌ Сервер отказал в подключении")
             return None
         except socket.gaierror as e:
-            logger.error(f"❌ Ошибка разрешения адреса {self.server_host}: {e}")
-            return None
-        except ConnectionResetError:
-            logger.error("⚠️ Сервер разорвал соединение. Возможно, фаервол блокирует подключение.")
+            logger.error(f"❌ Ошибка разрешения адреса: {e}")
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка подключения: {type(e).__name__}: {e}")
             return None
     
     def register_with_server(self, sock: socket.socket) -> bool:
-        """Регистрация на сервере"""
+        """Регистрация на сервере - УЛУЧШЕННАЯ версия"""
         try:
-            # Регистрируемся
-            registration = {
-                'type': 'capabilities',
-                'name': self.name,
-                'timestamp': time.time(),
-                'capabilities': {
-                    'cpu_cores': os.cpu_count() or 1,
-                    'platform': sys.platform,
-                    'python_version': sys.version.split()[0],
-                    'supported_tasks': ['matrix_mult', 'calculation', 'nn_inference']
-                }
-            }
-            
-            sock.sendall(json.dumps(registration).encode())
-            
-            # Ждем ответ с таймаутом
+            # ИСПРАВЛЕНО: Сначала ждем приветственное сообщение от сервера
             sock.settimeout(10)
+            logger.info("⏳ Ожидание приветствия от сервера...")
             data = sock.recv(4096)
             
-            if data:
-                response = json.loads(data.decode())
-                if response.get('type') == 'welcome':
-                    self.worker_id = response.get('worker_id')
-                    logger.info(f"✅ {response.get('message')}")
-                    logger.info(f"🆔 Ваш ID: {self.worker_id}")
-                    self.connected = True
-                    return True
-                else:
-                    logger.error(f"❌ Неожиданный ответ сервера: {response}")
+            if not data:
+                logger.error("❌ Сервер не отправил данные")
+                return False
             
-            return False
+            raw_response = data.decode('utf-8', errors='ignore')
+            logger.debug(f"Получен ответ от сервера: '{raw_response}'")
+            
+            # Пробуем распарсить JSON
+            try:
+                response = json.loads(raw_response.strip())
+            except json.JSONDecodeError:
+                # Пробуем найти JSON в строке
+                start_idx = raw_response.find('{')
+                end_idx = raw_response.rfind('}')
+                if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                    json_str = raw_response[start_idx:end_idx+1]
+                    response = json.loads(json_str)
+                else:
+                    logger.error(f"❌ Не удалось распарсить JSON от сервера: '{raw_response}'")
+                    return False
+            
+            if response.get('type') == 'welcome':
+                self.worker_id = response.get('worker_id')
+                logger.info(f"✅ {response.get('message')}")
+                logger.info(f"🆔 Ваш ID: {self.worker_id}")
+                
+                # Теперь отправляем регистрацию
+                registration = {
+                    'type': 'capabilities',
+                    'name': self.name,
+                    'timestamp': time.time(),
+                    'capabilities': {
+                        'cpu_cores': os.cpu_count() or 1,
+                        'platform': sys.platform,
+                        'python_version': sys.version.split()[0],
+                        'supported_tasks': ['matrix_mult', 'calculation', 'nn_inference']
+                    }
+                }
+                
+                registration_json = json.dumps(registration)
+                sock.sendall(registration_json.encode())
+                self.connected = True
+                logger.info(f"✅ Отправлена регистрация как '{self.name}'")
+                return True
+            else:
+                logger.error(f"❌ Неожиданный ответ сервера: {response}")
+                return False
             
         except socket.timeout:
-            logger.error("❌ Таймаут при регистрации")
+            logger.error("❌ Таймаут при ожидании приветствия от сервера")
             return False
         except json.JSONDecodeError:
             logger.error("❌ Некорректный JSON от сервера")
@@ -1152,7 +1222,8 @@ class WorkerNode:
                 'worker_id': self.worker_id,
                 'timestamp': time.time()
             }
-            sock.sendall(json.dumps(heartbeat).encode())
+            heartbeat_json = json.dumps(heartbeat)
+            sock.sendall(heartbeat_json.encode())
         except Exception as e:
             logger.warning(f"⚠️ Ошибка отправки heartbeat: {e}")
     
@@ -1250,9 +1321,11 @@ class WorkerNode:
     def worker_loop(self, sock: socket.socket):
         """Основной цикл работы рабочего"""
         last_heartbeat = 0
-        last_activity = time.time()
         
         try:
+            logger.info("🚀 Рабочий узел готов к выполнению задач!")
+            logger.info("=" * 50)
+            
             while self.running and self.connected:
                 current_time = time.time()
                 
@@ -1262,14 +1335,14 @@ class WorkerNode:
                     last_heartbeat = current_time
                 
                 try:
-                    # Проверяем наличие задач с небольшим таймаутом
+                    # Проверяем наличие задач
                     sock.settimeout(2)
                     data = sock.recv(4096)
                     
                     if data:
-                        last_activity = time.time()
+                        raw_data = data.decode('utf-8', errors='ignore')
                         try:
-                            message = json.loads(data.decode('utf-8'))
+                            message = json.loads(raw_data.strip())
                             
                             if message.get('type') == 'task':
                                 task_id = message['task_id']
@@ -1289,7 +1362,8 @@ class WorkerNode:
                                     'timestamp': time.time()
                                 }
                                 
-                                sock.sendall(json.dumps(response).encode())
+                                response_json = json.dumps(response)
+                                sock.sendall(response_json.encode())
                                 
                                 if result['status'] == 'success':
                                     logger.info(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
@@ -1301,16 +1375,9 @@ class WorkerNode:
                                 pass
                                 
                         except json.JSONDecodeError:
-                            logger.warning("⚠️ Некорректный JSON от сервера")
-                    
-                    # Проверка активности (если нет активности 60 секунд)
-                    if current_time - last_activity > 60:
-                        logger.info("ℹ️ Отправка heartbeat для поддержания соединения...")
-                        self._send_heartbeat(sock)
-                        last_activity = current_time
+                            logger.warning(f"⚠️ Некорректный JSON от сервера: '{raw_data}'")
                         
                 except socket.timeout:
-                    # Таймаут - нормальная ситуация, продолжаем цикл
                     continue
                 except ConnectionResetError:
                     logger.error("❌ Соединение разорвано сервером")
@@ -1340,60 +1407,32 @@ class WorkerNode:
         
         while self.running:
             try:
-                # Сбрасываем счетчик попыток если был успешный коннект
-                if self.connected:
-                    self.connection_attempts = 0
-                    self.reconnect_delay = 5
-                else:
-                    self.connection_attempts += 1
+                self.connection_attempts += 1
                 
-                # Проверяем максимальное количество попыток
                 if self.connection_attempts > self.max_connection_attempts:
-                    logger.error(f"❌ Превышено максимальное количество попыток подключения ({self.max_connection_attempts})")
-                    logger.info("⚠️ Проверьте:")
-                    logger.info("  1. Запущен ли координатор на сервере")
-                    logger.info("  2. Правильность IP-адреса и порта")
-                    logger.info("  3. Настройки фаервола и антивируса")
-                    logger.info("  4. Доступность сервера из сети")
-                    self.running = False
+                    logger.error(f"❌ Превышено максимальное количество попыток ({self.max_connection_attempts})")
                     break
                 
-                # Подключаемся к серверу
                 sock = self.safe_connect()
                 
                 if not sock:
-                    if self.connection_attempts == 1:
-                        logger.info("💡 Советы по устранению проблем:")
-                        logger.info("  1. Убедитесь, что координатор запущен")
-                        logger.info("  2. Проверьте правильность IP-адреса: 185.185.142.113")
-                        logger.info("  3. Проверьте, открыт ли порт 8888 на сервере")
-                        logger.info("  4. Отключите фаервол или антивирус на время теста")
-                    
-                    logger.warning(f"⚠️ Повторная попытка через {self.reconnect_delay} сек... (попытка {self.connection_attempts}/{self.max_connection_attempts})")
+                    logger.warning(f"⚠️ Повтор через {self.reconnect_delay} сек... (попытка {self.connection_attempts}/{self.max_connection_attempts})")
                     time.sleep(self.reconnect_delay)
-                    
-                    # Экспоненциальная задержка переподключения
-                    self.reconnect_delay = min(self.reconnect_delay * 1.5, 60)  # Максимум 60 секунд
+                    self.reconnect_delay = min(self.reconnect_delay * 1.5, 60)
                     continue
                 
-                # Регистрируемся на сервере
                 if not self.register_with_server(sock):
                     logger.warning("⚠️ Ошибка регистрации, переподключение...")
                     sock.close()
                     time.sleep(5)
                     continue
                 
-                # Сбрасываем счетчик попыток при успешной регистрации
+                # Сброс счетчика при успешном подключении
                 self.connection_attempts = 0
                 self.reconnect_delay = 5
                 
-                # Запускаем основной рабочий цикл
-                logger.info("🚀 Рабочий узел готов к выполнению задач!")
-                logger.info("=" * 50)
-                
                 self.worker_loop(sock)
                 
-                # Если отключились, но еще работаем
                 if self.running and not self.connected:
                     logger.warning("⚠️ Потеряно соединение с сервером")
                     logger.info(f"🔌 Переподключение через {self.reconnect_delay} сек...")
@@ -1405,7 +1444,7 @@ class WorkerNode:
                 self.running = False
                 break
             except Exception as e:
-                logger.error(f"❌ Критическая ошибка в основном цикле: {type(e).__name__}: {e}")
+                logger.error(f"❌ Критическая ошибка: {type(e).__name__}: {e}")
                 time.sleep(10)
         
         logger.info("👷 Рабочий узел остановлен")
@@ -1433,7 +1472,6 @@ def main():
     args = parser.parse_args()
     
     if args.coordinator:
-        # Запуск координатора
         coordinator = NetworkCoordinator(
             host=args.host,
             worker_port=args.port,
@@ -1447,7 +1485,6 @@ def main():
             print("Пример: python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
             return
         
-        # Запуск рабочего узла
         worker = WorkerNode(
             server_host=args.host,
             server_port=args.port,
@@ -1456,7 +1493,6 @@ def main():
         worker.start()
     
     else:
-        # Информационный вывод
         print("=" * 70)
         print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ")
         print("=" * 70)
@@ -1476,7 +1512,6 @@ def main():
         print("     python ai_network.py --coordinator --host 0.0.0.0")
         print("=" * 70)
         
-        # Автоматический выбор режима
         choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, Enter - выход): ")
         
         if choice == '1':
