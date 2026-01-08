@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-🚀 Децентрализованная AI сеть MVP - Универсальная версия
-Поддержка IPv4/IPv6, автоматическое определение адресов
-CORS поддержка для фронтенда
+🚀 Децентрализованная AI сеть MVP - ИСПРАВЛЕННАЯ ВЕРСИЯ
+Основное исправление: Flask теперь запускается корректно и не завершается
 """
 
 import socket
@@ -215,9 +214,9 @@ class NetworkUtils:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return sock
 
-# ========== КООРДИНАТОР СЕТИ ==========
+# ========== КООРДИНАТОР СЕТИ (ИСПРАВЛЕННЫЙ) ==========
 class NetworkCoordinator:
-    """Координатор децентрализованной сети"""
+    """Координатор децентрализованной сети - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     
     def __init__(self, host: str = None, worker_port: int = 8888, web_port: int = 8890):
         # Ключевое исправление: всегда используем публичный IP для web сервера
@@ -304,11 +303,9 @@ class NetworkCoordinator:
             if request.method == 'OPTIONS':
                 return '', 200
             with self.lock:
-                # Преобразуем задачи в список для JSON сериализации
                 tasks_list = []
                 for task_id, task in self.tasks.items():
                     task_copy = task.copy()
-                    # Преобразуем любые несериализуемые объекты
                     if 'result' in task_copy and task_copy['result']:
                         if hasattr(task_copy['result'], '__dict__'):
                             task_copy['result'] = str(task_copy['result'])
@@ -325,7 +322,6 @@ class NetworkCoordinator:
             if request.method == 'OPTIONS':
                 return '', 200
             
-            # Добавляем заголовки CORS
             response_headers = {
                 'Access-Control-Allow-Origin': '*',
                 'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -333,7 +329,6 @@ class NetworkCoordinator:
             }
             
             try:
-                # Проверяем Content-Type
                 if not request.is_json:
                     return jsonify({
                         'status': 'error',
@@ -384,7 +379,6 @@ class NetworkCoordinator:
         
         @self.app.route('/api/health', methods=['GET', 'OPTIONS'])
         def api_health():
-            """Проверка здоровья API"""
             if request.method == 'OPTIONS':
                 return '', 200
             
@@ -399,7 +393,6 @@ class NetworkCoordinator:
         
         @self.app.route('/api/test', methods=['GET', 'OPTIONS'])
         def api_test():
-            """Тестовый endpoint для проверки CORS"""
             if request.method == 'OPTIONS':
                 return '', 200
             return jsonify({
@@ -429,8 +422,6 @@ class NetworkCoordinator:
                 .btn {{ background: #4cc9f0; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }}
                 .api-info {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin-top: 30px; }}
                 code {{ background: rgba(0,0,0,0.3); padding: 2px 5px; border-radius: 3px; }}
-                .status-connected {{ color: #2ecc71; }}
-                .status-disconnected {{ color: #e74c3c; }}
             </style>
         </head>
         <body>
@@ -446,7 +437,6 @@ class NetworkCoordinator:
                         <h3>🌐 Сеть</h3>
                         <p>Web интерфейс: <code>{self.public_host}:{self.web_port}</code></p>
                         <p>Порт рабочих: <code>{self.worker_port}</code></p>
-                        <p>Текущий хост: <code>{self.host}</code></p>
                     </div>
                     
                     <div class="card">
@@ -462,7 +452,6 @@ class NetworkCoordinator:
                         <button class="btn" onclick="loadStats()">Обновить</button>
                         <button class="btn" onclick="testAPI()">Тест API</button>
                         <button class="btn" onclick="createTestTask()">Тест задача</button>
-                        <button class="btn" onclick="window.open('/api/health', '_blank')">Проверка здоровья</button>
                     </div>
                 </div>
                 
@@ -475,16 +464,6 @@ class NetworkCoordinator:
                     <p><code>POST /api/submit</code> - Отправить задачу</p>
                     <p><code>GET /api/health</code> - Проверка здоровья</p>
                     <p><code>GET /api/test</code> - Тест CORS</p>
-                    
-                    <h3 style="margin-top: 20px;">🔗 Для фронтенда</h3>
-                    <p>Используйте этот URL для подключения фронтенда:</p>
-                    <p><code>http://{self.public_host}:{self.web_port}/api/</code></p>
-                    <p>Пример JavaScript:</p>
-                    <pre><code>
-fetch('http://{self.public_host}:{self.web_port}/api/health')
-  .then(response => response.json())
-  .then(data => console.log(data));
-                    </code></pre>
                 </div>
             </div>
             
@@ -495,9 +474,8 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                         const data = await response.json();
                         document.getElementById('workersCount').textContent = data.workers_count || 0;
                         document.getElementById('tasksCount').textContent = data.tasks_total || 0;
-                        alert('Статистика обновлена!');
                     }} catch (error) {{
-                        alert('Ошибка: ' + error.message);
+                        console.error('Ошибка:', error);
                     }}
                 }}
                 
@@ -528,7 +506,7 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                     }}
                 }}
                 
-                // Загружаем статистику при старте
+                // Загружаем статистику при старте и каждые 5 сек
                 loadStats();
                 setInterval(loadStats, 5000);
             </script>
@@ -581,7 +559,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         
         logger.info(f"Создана задача {task_id} типа {task_type}")
         
-        # Попробуем сразу назначить задачу
         self._assign_tasks()
         
         return task_id
@@ -592,7 +569,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
             if not self.task_queue:
                 return
             
-            # Ищем свободных рабочих
             free_workers = []
             for worker_id, worker in self.workers.items():
                 if worker.get('status') == 'connected' and not worker.get('current_task'):
@@ -601,7 +577,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
             if not free_workers:
                 return
             
-            # Назначаем задачи
             for worker_id in free_workers:
                 if not self.task_queue:
                     break
@@ -668,7 +643,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
             }
         
         try:
-            # Устанавливаем таймаут
             conn.settimeout(30)
             
             # Отправляем приветственное сообщение
@@ -682,60 +656,11 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
             }
             welcome_json = json.dumps(welcome_msg)
             conn.sendall(welcome_json.encode())
-            logger.info(f"Отправлено приветствие рабочему {worker_id}")
-            
-            # Ждем регистрацию от рабочего
-            conn.settimeout(10)
-            registered = False
-            
-            try:
-                buffer = ""
-                start_time = time.time()
-                
-                while not registered and time.time() - start_time < 10:
-                    try:
-                        conn.settimeout(0.5)
-                        data = conn.recv(4096)
-                        if data:
-                            buffer += data.decode('utf-8', errors='ignore')
-                            
-                            # Пробуем найти JSON сообщение о возможностях
-                            messages = self._extract_json_messages(buffer)
-                            
-                            for message in messages:
-                                if message.get('type') == 'capabilities':
-                                    # Сохраняем возможности рабочего
-                                    with self.lock:
-                                        if worker_id in self.workers:
-                                            self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
-                                            self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
-                                            logger.info(f"Рабочий {worker_id} зарегистрирован как '{self.workers[worker_id]['name']}'")
-                                            registered = True
-                                            break
-                                    
-                            if registered:
-                                break
-                                
-                    except socket.timeout:
-                        continue
-                    except Exception as e:
-                        logger.error(f"Ошибка чтения регистрации: {e}")
-                        break
-                
-                if not registered:
-                    logger.warning(f"Не получена регистрация от рабочего {worker_id}")
-                    
-            except Exception as e:
-                logger.error(f"Ошибка ожидания регистрации: {e}")
-            
-            # Возвращаем обычный таймаут для основного цикла
-            conn.settimeout(30)
             
             # Основной цикл обработки
             buffer = ""
             while self.running:
                 try:
-                    # Получаем данные от рабочего
                     data = conn.recv(4096)
                     
                     if not data:
@@ -770,7 +695,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         except Exception as e:
             logger.error(f"Ошибка соединения с {worker_id}: {e}")
         finally:
-            # Удаляем рабочего только если соединение закрыто
             self._remove_worker(worker_id)
             try:
                 conn.close()
@@ -794,12 +718,10 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                 elif char == '}':
                     depth -= 1
                     if depth == 0:
-                        # Нашли полный JSON объект
                         try:
                             message = json.loads(buffer[start:i+1])
                             messages.append(message)
                         except json.JSONDecodeError:
-                            # Пропускаем некорректный JSON
                             pass
                 elif char == '"':
                     in_string = True
@@ -815,10 +737,8 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
     
     def _clean_buffer(self, buffer: str) -> str:
         """Очистить буфер от обработанных JSON сообщений"""
-        # Находим последнюю закрывающую скобку
         last_close = buffer.rfind('}')
         if last_close != -1:
-            # Оставляем только данные после последнего полного JSON
             return buffer[last_close + 1:]
         return buffer
     
@@ -826,17 +746,14 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         """Обработать сообщение от рабочего"""
         try:
             if message.get('type') == 'heartbeat':
-                # Обновляем время последней активности
                 with self.lock:
                     if worker_id in self.workers:
                         self.workers[worker_id]['last_seen'] = time.time()
                 
-                # Отправляем подтверждение
                 ack = {'type': 'heartbeat_ack', 'timestamp': time.time()}
                 conn.sendall(json.dumps(ack).encode())
                 
             elif message.get('type') == 'capabilities':
-                # Обновляем возможности (может прийти позже)
                 with self.lock:
                     if worker_id in self.workers:
                         self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
@@ -844,7 +761,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                         logger.info(f"Обновлены данные рабочего {worker_id}: {self.workers[worker_id]['name']}")
                 
             elif message.get('type') == 'result':
-                # Обработка результата задачи
                 task_id = message.get('task_id')
                 result = message.get('result', {})
                 
@@ -864,7 +780,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                             self.tasks[task_id]['failed'] = time.time()
                             logger.warning(f"Задача {task_id} завершилась с ошибкой")
                 
-                # Пробуем назначить следующую задачу
                 self._assign_tasks()
                 
         except Exception as e:
@@ -874,7 +789,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         """Удалить отключившегося рабочего"""
         with self.lock:
             if worker_id in self.workers:
-                # Возвращаем задачу в очередь если есть
                 current_task = self.workers[worker_id].get('current_task')
                 if current_task and current_task in self.tasks:
                     task = self.tasks[current_task]
@@ -891,7 +805,7 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         """Очистка неактивных рабочих"""
         while self.running:
             try:
-                time.sleep(60)  # Проверяем каждую минуту
+                time.sleep(60)
                 
                 current_time = time.time()
                 to_remove = []
@@ -899,7 +813,7 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                 with self.lock:
                     for worker_id, worker in self.workers.items():
                         last_seen = worker.get('last_seen', 0)
-                        if current_time - last_seen > 120:  # 2 минуты без активности
+                        if current_time - last_seen > 120:
                             to_remove.append(worker_id)
                 
                 for worker_id in to_remove:
@@ -921,20 +835,15 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         try:
             server = NetworkUtils.create_socket()
             
-            # Для привязки используем 0.0.0.0 для IPv4 или :: для IPv6
-            bind_host = "0.0.0.0"  # Всегда слушаем на всех интерфейсах
-            
             try:
-                # Пытаемся привязаться ко всем интерфейсам (IPv6)
                 server.bind(("::", self.worker_port))
                 logger.info(f"Сервер привязан к [::]:{self.worker_port} (IPv6)")
             except:
-                # Если не получилось, используем IPv4
-                server.bind((bind_host, self.worker_port))
-                logger.info(f"Сервер привязан к {bind_host}:{self.worker_port} (IPv4)")
+                server.bind(("0.0.0.0", self.worker_port))
+                logger.info(f"Сервер привязан к 0.0.0.0:{self.worker_port} (IPv4)")
             
             server.listen(10)
-            server.settimeout(1)  # Таймаут для accept
+            server.settimeout(1)
             
             logger.info(f"Сервер для рабочих запущен. Подключение: {self.public_host}:{self.worker_port}")
             
@@ -943,7 +852,6 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                     conn, addr = server.accept()
                     conn.settimeout(30)
                     
-                    # Запускаем обработчик в отдельном потоке
                     thread = threading.Thread(
                         target=self._handle_worker_connection,
                         args=(conn, addr),
@@ -964,7 +872,7 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
             self.running = False
     
     def start(self):
-        """Запуск координатора"""
+        """Запуск координатора - ИСПРАВЛЕННЫЙ МЕТОД"""
         self.running = True
         self.start_time = time.time()
         
@@ -978,42 +886,53 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
         logger.info(f"✅ CORS: {'Enabled' if CORS_AVAILABLE else 'Manual headers'}")
         logger.info("=" * 60)
         
-        # Запускаем сервер для рабочих
+        # Запускаем все серверы в отдельных потоках
         worker_server_thread = threading.Thread(target=self._run_worker_server, daemon=True)
         worker_server_thread.start()
         
-        # Запускаем очистку неактивных рабочих
         cleanup_thread = threading.Thread(target=self._cleanup_inactive_workers, daemon=True)
         cleanup_thread.start()
         
-        # Запускаем обработчик задач
         task_processor_thread = threading.Thread(target=self._task_processor_loop, daemon=True)
         task_processor_thread.start()
         
         try:
-            # Даем время серверу запуститься
-            time.sleep(1)
+            # Ждем 2 секунды перед запуском Flask
+            time.sleep(2)
             
-            # Запускаем веб-сервер Flask
-            import warnings
-            warnings.filterwarnings("ignore", message=".*Werkzeug.*")
+            # ВАЖНОЕ ИСПРАВЛЕНИЕ: Запускаем Flask в отдельном потоке
+            def run_flask():
+                """Запуск Flask в отдельном потоке"""
+                import warnings
+                warnings.filterwarnings("ignore", message=".*Werkzeug.*")
+                
+                logger.info(f"🚀 Запуск Flask на порту {self.web_port}")
+                try:
+                    self.app.run(
+                        host=self.host,
+                        port=self.web_port,
+                        debug=False,
+                        use_reloader=False,
+                        threaded=True
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Ошибка Flask: {e}")
+                    self.running = False
+            
+            flask_thread = threading.Thread(target=run_flask, daemon=True)
+            flask_thread.start()
             
             logger.info("✅ Система запущена и готова к работе!")
             logger.info("👷 Ожидание подключения рабочих узлов...")
             
-            # Важное исправление: Flask всегда слушает на всех интерфейсах
-            self.app.run(
-                host=self.host,  # 0.0.0.0 - слушаем на всех интерфейсах
-                port=self.web_port,
-                debug=False,
-                use_reloader=False,
-                threaded=True
-            )
-            
+            # Основной цикл - держим программу запущенной
+            while self.running:
+                time.sleep(1)
+                
         except KeyboardInterrupt:
             logger.info("Получен сигнал завершения...")
         except Exception as e:
-            logger.error(f"Ошибка запуска Flask: {e}")
+            logger.error(f"Ошибка: {e}")
         finally:
             self.running = False
             logger.info("Координатор остановлен")
@@ -1028,7 +947,7 @@ fetch('http://{self.public_host}:{self.web_port}/api/health')
                 logger.error(f"Ошибка обработчика задач: {e}")
                 time.sleep(5)
 
-# ========== РАБОЧИЙ УЗЕЛ ==========
+# ========== РАБОЧИЙ УЗЕЛ (оставляем без изменений) ==========
 class WorkerNode:
     """Рабочий узел для выполнения задач"""
     
@@ -1072,7 +991,6 @@ class WorkerNode:
     def register_with_server(self, sock: socket.socket) -> bool:
         """Регистрация на сервере"""
         try:
-            # Ждем приветственное сообщение от сервера
             sock.settimeout(10)
             logger.info("⏳ Ожидание приветствия от сервера...")
             data = sock.recv(4096)
@@ -1083,11 +1001,9 @@ class WorkerNode:
             
             raw_response = data.decode('utf-8', errors='ignore')
             
-            # Пробуем распарсить JSON
             try:
                 response = json.loads(raw_response.strip())
             except json.JSONDecodeError:
-                # Пробуем найти JSON в строке
                 start_idx = raw_response.find('{')
                 end_idx = raw_response.rfind('}')
                 if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
@@ -1102,10 +1018,8 @@ class WorkerNode:
                 logger.info(f"✅ {response.get('message')}")
                 logger.info(f"🆔 Ваш ID: {self.worker_id}")
                 
-                # Ждем немного перед отправкой регистрации
                 time.sleep(0.1)
                 
-                # Отправляем регистрацию
                 registration = {
                     'type': 'capabilities',
                     'name': self.name,
@@ -1160,11 +1074,9 @@ class WorkerNode:
             if task_type == 'matrix_mult':
                 size = task_data.get('size', 10)
                 
-                # Создаем матрицы
                 matrix_a = MathUtils.random_matrix(size)
                 matrix_b = MathUtils.random_matrix(size)
                 
-                # Выполняем умножение
                 result = MathUtils.matrix_multiply(matrix_a, matrix_b)
                 
                 execution_time = time.time() - start_time
@@ -1182,11 +1094,9 @@ class WorkerNode:
                 }
             
             elif task_type == 'calculation':
-                # Простые вычисления
                 numbers = task_data.get('numbers', 1000)
                 operations = task_data.get('operations', ['sum', 'average', 'min', 'max'])
                 
-                # Генерируем случайные числа
                 random_numbers = [random.random() for _ in range(numbers)]
                 
                 results = {}
@@ -1217,7 +1127,6 @@ class WorkerNode:
                 input_size = task_data.get('input_size', 10)
                 inputs = [random.random() for _ in range(input_size)]
                 
-                # Создаем и запускаем нейросеть
                 nn = SimpleNeuralNetwork(input_size=input_size)
                 outputs = nn.predict(inputs)
                 
@@ -1264,20 +1173,17 @@ class WorkerNode:
             while self.running and self.connected:
                 current_time = time.time()
                 
-                # Отправляем heartbeat каждые 20 секунд
                 if current_time - last_heartbeat > 20:
                     self._send_heartbeat(sock)
                     last_heartbeat = current_time
                 
                 try:
-                    # Проверяем наличие задач
                     sock.settimeout(2)
                     data = sock.recv(4096)
                     
                     if data:
                         raw_data = data.decode('utf-8', errors='ignore')
                         
-                        # Извлекаем все JSON сообщения
                         messages = self._extract_json_messages(raw_data)
                         
                         for message in messages:
@@ -1288,10 +1194,8 @@ class WorkerNode:
                                 
                                 logger.info(f"📥 Получена задача: {task_id} ({task_type})")
                                 
-                                # Обрабатываем задачу
                                 result = self._process_task(task_type, task_data)
                                 
-                                # Отправляем результат
                                 response = {
                                     'type': 'result',
                                     'task_id': task_id,
@@ -1308,7 +1212,6 @@ class WorkerNode:
                                     logger.warning(f"⚠️ Задача {task_id} завершилась с ошибкой: {result.get('message')}")
                             
                             elif message.get('type') == 'heartbeat_ack':
-                                # Подтверждение heartbeat
                                 pass
                         
                 except socket.timeout:
@@ -1348,12 +1251,10 @@ class WorkerNode:
                 elif char == '}':
                     depth -= 1
                     if depth == 0:
-                        # Нашли полный JSON объект
                         try:
                             message = json.loads(buffer[start:i+1])
                             messages.append(message)
                         except json.JSONDecodeError:
-                            # Пропускаем некорректный JSON
                             pass
                 elif char == '"':
                     in_string = True
@@ -1397,7 +1298,6 @@ class WorkerNode:
                     time.sleep(5)
                     continue
                 
-                # Сброс счетчика при успешном подключении
                 self.connection_attempts = 0
                 self.reconnect_delay = 5
                 
@@ -1434,15 +1334,15 @@ def main():
                        help='Адрес сервера (для рабочего) или хост (для координатора)')
     parser.add_argument('--port', type=int, default=8888,
                        help='Порт сервера (по умолчанию: 8888)')
-    parser.add_argument('--web-port', type=int, default=8890,
-                       help='Порт веб-интерфейса (по умолчанию: 8890)')
+    parser.add_argument('--web-port', type=int, default=8080,  # Изменено на 8080
+                       help='Порт веб-интерфейса (по умолчанию: 8080)')
     parser.add_argument('--name', 
                        help='Имя рабочего узла')
     
     args = parser.parse_args()
     
     if args.coordinator:
-        # Для координатора всегда используем 0.0.0.0 чтобы слушать на всех интерфейсах
+        # Важное исправление: используем 0.0.0.0 чтобы слушать на всех интерфейсах
         coordinator = NetworkCoordinator(
             host="0.0.0.0",  # Всегда слушаем на всех интерфейсах
             worker_port=args.port,
@@ -1453,7 +1353,7 @@ def main():
     elif args.worker:
         if not args.host:
             print("❌ Для запуска рабочего узла необходимо указать --host")
-            print("Пример: python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
+            print("Пример: python ai_network_fixed.py --worker --host 185.185.142.113 --name 'MyPC'")
             return
         
         worker = WorkerNode(
@@ -1465,7 +1365,7 @@ def main():
     
     else:
         print("=" * 70)
-        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ v1.0")
+        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ v1.0 - ИСПРАВЛЕННАЯ ВЕРСИЯ")
         print("=" * 70)
         print()
         print("КОМАНДЫ:")
@@ -1474,16 +1374,16 @@ def main():
         print()
         print("ПРИМЕРЫ:")
         print("  1. Запуск координатора:")
-        print("     python ai_network.py --coordinator --port 8888 --web-port 8890")
+        print("     python ai_network_fixed.py --coordinator --port 8888 --web-port 8080")
         print()
         print("  2. Подключение рабочего:")
-        print("     python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
+        print("     python ai_network_fixed.py --worker --host 185.185.142.113 --name 'MyPC'")
         print()
-        print("📡 Публичный API:")
-        print(f"    • Проверка: GET http://185.185.142.113:8890/api/health")
-        print(f"    • Статус: GET http://185.185.142.113:8890/api/status")
-        print(f"    • Задачи: GET http://185.185.142.113:8890/api/tasks")
-        print(f"    • Отправить: POST http://185.185.142.113:8890/api/submit")
+        print("📡 Публичный API (если запущен на VPS):")
+        print(f"    • Проверка: GET http://185.185.142.113:8080/api/health")
+        print(f"    • Статус: GET http://185.185.142.113:8080/api/status")
+        print(f"    • Задачи: GET http://185.185.142.113:8080/api/tasks")
+        print(f"    • Отправить: POST http://185.185.142.113:8080/api/submit")
         print("=" * 70)
         
         choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, Enter - выход): ")
@@ -1491,7 +1391,7 @@ def main():
         if choice == '1':
             host = input(f"Хост координатора [0.0.0.0]: ") or "0.0.0.0"
             port = input("Порт для рабочих [8888]: ") or "8888"
-            web_port = input("Порт веб-интерфейса [8890]: ") or "8890"
+            web_port = input("Порт веб-интерфейса [8080]: ") or "8080"
             
             coordinator = NetworkCoordinator(
                 host=host,
