@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🚀 Децентрализованная AI сеть MVP - ИСПРАВЛЕННАЯ ВЕРСИЯ
-Основное исправление: Flask теперь запускается корректно и не завершается
+🚀 AI Network Coordinator - БЕЗ FLASK
+Чистая реализация на сокетах и HTTP сервере
 """
 
 import socket
@@ -16,24 +16,9 @@ import argparse
 import os
 import sys
 import uuid
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, List, Optional, Any
-
-# Веб-интерфейс
-try:
-    from flask import Flask, jsonify, request
-    FLASK_AVAILABLE = True
-except ImportError:
-    FLASK_AVAILABLE = False
-    print("⚠️ Flask не установлен. Установите: pip install flask")
-    sys.exit(1)
-
-# CORS поддержка
-try:
-    from flask_cors import CORS
-    CORS_AVAILABLE = True
-except ImportError:
-    CORS_AVAILABLE = False
-    print("⚠️ Flask-CORS не установлен. Установите: pip install flask-cors")
+from urllib.parse import urlparse, parse_qs
 
 # Настройка логирования
 logging.basicConfig(
@@ -69,11 +54,6 @@ class MathUtils:
     def sigmoid(x: float) -> float:
         """Сигмоидная функция активации"""
         return 1.0 / (1.0 + math.exp(-x))
-    
-    @staticmethod
-    def vector_dot(v1: List[float], v2: List[float]) -> float:
-        """Скалярное произведение векторов"""
-        return sum(x * y for x, y in zip(v1, v2))
 
 # ========== ПРОСТАЯ НЕЙРОННАЯ СЕТЬ ==========
 class SimpleNeuralNetwork:
@@ -84,7 +64,6 @@ class SimpleNeuralNetwork:
         self.hidden_size = hidden_size
         self.output_size = output_size
         
-        # Инициализация весов случайными значениями
         self.w1 = [[random.uniform(-0.5, 0.5) for _ in range(hidden_size)] 
                    for _ in range(input_size)]
         self.b1 = [0.0] * hidden_size
@@ -95,17 +74,14 @@ class SimpleNeuralNetwork:
     
     def predict(self, inputs: List[float]) -> List[float]:
         """Прямой проход (инференс)"""
-        # Проверка входных данных
         if len(inputs) != self.input_size:
             raise ValueError(f"Ожидается {self.input_size} входов, получено {len(inputs)}")
         
-        # Скрытый слой
         hidden = [0.0] * self.hidden_size
         for i in range(self.hidden_size):
             weighted_sum = sum(inputs[j] * self.w1[j][i] for j in range(self.input_size))
             hidden[i] = MathUtils.sigmoid(weighted_sum + self.b1[i])
         
-        # Выходной слой
         outputs = [0.0] * self.output_size
         for i in range(self.output_size):
             weighted_sum = sum(hidden[j] * self.w2[j][i] for j in range(self.hidden_size))
@@ -124,23 +100,19 @@ class NetworkUtils:
         try:
             hostname = socket.gethostname()
             
-            # Получаем все адреса
             for info in socket.getaddrinfo(hostname, None):
                 address = info[4][0]
                 if address not in addresses:
                     addresses.append(address)
             
-            # Если не нашли, пробуем альтернативные методы
             if not addresses:
                 try:
-                    # Внешний IP
                     import urllib.request
                     external_ip = urllib.request.urlopen('https://api.ipify.org', timeout=3).read().decode()
                     addresses.append(external_ip)
                 except:
                     pass
                 
-                # Локальные адреса
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     s.connect(("8.8.8.8", 80))
@@ -162,10 +134,8 @@ class NetworkUtils:
         try:
             addresses = NetworkUtils.get_all_ip_addresses()
             
-            # Предпочитаем IPv4 адреса
             ipv4_addresses = [ip for ip in addresses if ':' not in ip and not ip.startswith('127.')]
             if ipv4_addresses:
-                # Ищем публичный IPv4
                 public_ipv4 = [ip for ip in ipv4_addresses if not (
                     ip.startswith('10.') or 
                     ip.startswith('172.16.') or 
@@ -173,14 +143,12 @@ class NetworkUtils:
                 )]
                 if public_ipv4:
                     return public_ipv4[0]
-                return ipv4_addresses[0]  # Возвращаем любой IPv4
+                return ipv4_addresses[0]
             
-            # Если нет IPv4, ищем IPv6
             ipv6_addresses = [ip for ip in addresses if ':' in ip and ip != '::1']
             if ipv6_addresses:
                 return ipv6_addresses[0]
             
-            # По умолчанию
             return "0.0.0.0"
             
         except Exception as e:
@@ -191,17 +159,14 @@ class NetworkUtils:
     def create_socket() -> socket.socket:
         """Создать сокет с правильными настройками"""
         try:
-            # Сначала пытаемся создать сокет, поддерживающий IPv6
             if socket.has_ipv6:
                 sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                # Включаем поддержку IPv4 через IPv6
                 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
                 return sock
         except:
             pass
         
-        # Если IPv6 не поддерживается или произошла ошибка, используем IPv4
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         return sock
@@ -214,25 +179,267 @@ class NetworkUtils:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return sock
 
-# ========== КООРДИНАТОР СЕТИ (ИСПРАВЛЕННЫЙ) ==========
-class NetworkCoordinator:
-    """Координатор децентрализованной сети - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+# ========== HTTP API HANDLER ==========
+class APIHandler(BaseHTTPRequestHandler):
+    """HTTP обработчик для API координатора"""
     
-    def __init__(self, host: str = None, worker_port: int = 8888, web_port: int = 8890):
-        # Ключевое исправление: всегда используем публичный IP для web сервера
+    def __init__(self, *args, coordinator=None, **kwargs):
+        self.coordinator = coordinator
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format, *args):
+        """Отключение стандартного лога HTTP сервера"""
+        logger.debug(f"HTTP {self.address_string()} - {format % args}")
+    
+    def do_OPTIONS(self):
+        """Обработка CORS preflight запросов"""
+        self.send_response(200)
+        self.send_cors_headers()
+        self.end_headers()
+    
+    def do_GET(self):
+        """Обработка GET запросов"""
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if path == '/':
+            self.serve_index()
+        elif path == '/api/health':
+            self.api_health()
+        elif path == '/api/status':
+            self.api_status()
+        elif path == '/api/stats':
+            self.api_stats()
+        elif path == '/api/tasks':
+            self.api_tasks()
+        elif path == '/api/workers':
+            self.api_workers()
+        elif path == '/api/test':
+            self.api_test()
+        else:
+            self.send_error(404, "Not Found")
+    
+    def do_POST(self):
+        """Обработка POST запросов"""
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        if path == '/api/submit':
+            self.api_submit()
+        else:
+            self.send_error(404, "Not Found")
+    
+    def send_cors_headers(self):
+        """Отправка CORS заголовков"""
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept')
+        self.send_header('Access-Control-Allow-Credentials', 'true')
+    
+    def send_json_response(self, data: Dict, status_code: int = 200):
+        """Отправить JSON ответ"""
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_cors_headers()
+        self.end_headers()
+        
+        json_data = json.dumps(data, ensure_ascii=False, indent=2)
+        self.wfile.write(json_data.encode('utf-8'))
+    
+    def serve_index(self):
+        """Главная страница с информацией"""
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🤖 AI Network Coordinator</title>
+            <meta charset="utf-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 40px; background: #0f3460; color: white; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                          color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }}
+                .card {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin-bottom: 20px; }}
+                code {{ background: rgba(0,0,0,0.3); padding: 2px 5px; border-radius: 3px; }}
+                .btn {{ background: #4cc9f0; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🤖 AI Network Coordinator</h1>
+                    <p>Децентрализованная сеть распределенных вычислений</p>
+                    <p>Публичный адрес: <code>{self.coordinator.public_host}:{self.coordinator.api_port}</code></p>
+                </div>
+                
+                <div class="card">
+                    <h3>📡 API Endpoints</h3>
+                    <p><code>GET /api/health</code> - Проверка здоровья</p>
+                    <p><code>GET /api/status</code> - Статус координатора</p>
+                    <p><code>GET /api/stats</code> - Статистика сети</p>
+                    <p><code>GET /api/tasks</code> - Список задач</p>
+                    <p><code>GET /api/workers</code> - Список рабочих</p>
+                    <p><code>POST /api/submit</code> - Отправить задачу</p>
+                    <p><code>GET /api/test</code> - Тест CORS</p>
+                </div>
+                
+                <div class="card">
+                    <h3>🔗 Для фронтенда на GitHub Pages</h3>
+                    <p>Используйте этот URL для подключения:</p>
+                    <p><code>http://{self.coordinator.public_host}:{self.coordinator.api_port}/api/</code></p>
+                    <p>Пример JavaScript:</p>
+                    <pre><code>
+fetch('http://{self.coordinator.public_host}:{self.coordinator.api_port}/api/health')
+  .then(response => response.json())
+  .then(data => console.log(data));
+                    </code></pre>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.send_cors_headers()
+        self.end_headers()
+        self.wfile.write(html.encode('utf-8'))
+    
+    def api_health(self):
+        """Проверка здоровья API"""
+        self.send_json_response({
+            'status': 'healthy',
+            'timestamp': time.time(),
+            'service': 'ai-network-coordinator',
+            'version': '1.0.0',
+            'host': self.coordinator.public_host,
+            'port': self.coordinator.api_port,
+            'api': 'http-server',
+            'workers_port': self.coordinator.worker_port
+        })
+    
+    def api_status(self):
+        """Статус координатора"""
+        self.send_json_response({
+            'status': 'running',
+            'coordinator': {
+                'host': self.coordinator.public_host,
+                'worker_port': self.coordinator.worker_port,
+                'api_port': self.coordinator.api_port,
+                'uptime': time.time() - self.coordinator.start_time,
+                'started': self.coordinator.start_time
+            },
+            'api_version': '1.0'
+        })
+    
+    def api_stats(self):
+        """Статистика сети"""
+        with self.coordinator.lock:
+            stats = self.coordinator._get_stats()
+        self.send_json_response(stats)
+    
+    def api_tasks(self):
+        """Список задач"""
+        with self.coordinator.lock:
+            tasks_list = []
+            for task_id, task in self.coordinator.tasks.items():
+                task_copy = task.copy()
+                if 'result' in task_copy and task_copy['result']:
+                    if hasattr(task_copy['result'], '__dict__'):
+                        task_copy['result'] = str(task_copy['result'])
+                tasks_list.append(task_copy)
+            
+            data = {
+                'tasks': tasks_list,
+                'queue': self.coordinator.task_queue,
+                'total_tasks': len(tasks_list)
+            }
+        self.send_json_response(data)
+    
+    def api_workers(self):
+        """Список рабочих"""
+        with self.coordinator.lock:
+            workers = []
+            for worker_id, worker in self.coordinator.workers.items():
+                workers.append({
+                    'id': worker_id[:8],
+                    'name': worker.get('name', 'unknown'),
+                    'address': f"{worker['addr'][0]}:{worker['addr'][1]}",
+                    'status': worker.get('status', 'unknown'),
+                    'last_seen': worker.get('last_seen', time.time()),
+                    'current_task': worker.get('current_task'),
+                    'capabilities': worker.get('capabilities', {})
+                })
+            
+            data = {
+                'workers': workers,
+                'total_workers': len(workers),
+                'connected_workers': len([w for w in workers if w.get('status') == 'connected'])
+            }
+        self.send_json_response(data)
+    
+    def api_test(self):
+        """Тестовый endpoint для проверки CORS"""
+        self.send_json_response({
+            'message': 'CORS работает!',
+            'method': 'GET',
+            'timestamp': time.time(),
+            'server': 'ai-network-http'
+        })
+    
+    def api_submit(self):
+        """Отправить задачу"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                return self.send_json_response({
+                    'status': 'error',
+                    'message': 'Empty request body'
+                }, 400)
+            
+            raw_data = self.rfile.read(content_length)
+            data = json.loads(raw_data.decode('utf-8'))
+            
+            task_type = data.get('type', 'matrix_mult')
+            task_data = data.get('data', {})
+            
+            task_id = self.coordinator._create_task(task_type, task_data)
+            
+            self.send_json_response({
+                'status': 'success',
+                'task_id': task_id,
+                'message': 'Задача создана',
+                'type': task_type
+            })
+            
+        except json.JSONDecodeError:
+            self.send_json_response({
+                'status': 'error',
+                'message': 'Invalid JSON'
+            }, 400)
+        except Exception as e:
+            self.send_json_response({
+                'status': 'error',
+                'message': str(e),
+                'error_type': type(e).__name__
+            }, 400)
+
+# ========== КООРДИНАТОР СЕТИ (БЕЗ FLASK) ==========
+class NetworkCoordinator:
+    """Координатор децентрализованной сети без Flask"""
+    
+    def __init__(self, host: str = None, worker_port: int = 8888, api_port: int = 8080):
         if host is None or host == "" or host == "0.0.0.0":
-            # Получаем публичный IP
             self.public_host = NetworkUtils.get_best_public_ip()
             if self.public_host == "0.0.0.0":
-                # Если не смогли определить, используем статический IP
                 self.public_host = "185.185.142.113"
-            self.host = "0.0.0.0"  # Flask будет слушать на всех интерфейсах
+            self.host = "0.0.0.0"
         else:
             self.host = host
             self.public_host = host
         
         self.worker_port = worker_port
-        self.web_port = web_port
+        self.api_port = api_port
         
         # Данные сети
         self.workers: Dict[str, Dict] = {}
@@ -243,302 +450,38 @@ class NetworkCoordinator:
         self.lock = threading.RLock()
         self.running = False
         
-        # Веб-сервер с CORS
-        self.app = Flask(__name__)
+        # HTTP сервер
+        self.http_server = None
         
-        # Настройка CORS - РУЧНАЯ НАСТРОЙКА для надежности
-        @self.app.after_request
-        def add_cors_headers(response):
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
-            response.headers['Access-Control-Allow-Credentials'] = 'true'
-            return response
-        
-        # Дополнительно настраиваем flask-cors если доступен
-        if CORS_AVAILABLE:
-            CORS(self.app, resources={r"/api/*": {"origins": "*"}})
-            logger.info("CORS включен через flask-cors")
-        else:
-            logger.info("CORS включен через ручные заголовки")
-        
-        self._setup_web_routes()
-        
-        logger.info(f"Инициализация координатора на {self.host}:{self.worker_port}")
+        logger.info(f"Инициализация координатора на {self.host}")
         logger.info(f"Публичный адрес: {self.public_host}")
-    
-    def _setup_web_routes(self):
-        """Настройка маршрутов веб-сервера с CORS"""
-        
-        @self.app.route('/')
-        def index():
-            return self._get_web_interface()
-        
-        @self.app.route('/api/status', methods=['GET', 'OPTIONS'])
-        def api_status():
-            if request.method == 'OPTIONS':
-                return '', 200
-            return jsonify({
-                'status': 'running',
-                'coordinator': {
-                    'host': self.public_host,
-                    'worker_port': self.worker_port,
-                    'web_port': self.web_port,
-                    'uptime': getattr(self, 'start_time', time.time())
-                },
-                'cors': 'enabled',
-                'api_version': '1.0'
-            })
-        
-        @self.app.route('/api/stats', methods=['GET', 'OPTIONS'])
-        def api_stats():
-            if request.method == 'OPTIONS':
-                return '', 200
-            with self.lock:
-                stats = self._get_stats()
-            return jsonify(stats)
-        
-        @self.app.route('/api/tasks', methods=['GET', 'OPTIONS'])
-        def api_tasks():
-            if request.method == 'OPTIONS':
-                return '', 200
-            with self.lock:
-                tasks_list = []
-                for task_id, task in self.tasks.items():
-                    task_copy = task.copy()
-                    if 'result' in task_copy and task_copy['result']:
-                        if hasattr(task_copy['result'], '__dict__'):
-                            task_copy['result'] = str(task_copy['result'])
-                    tasks_list.append(task_copy)
-                
-                return jsonify({
-                    'tasks': tasks_list,
-                    'queue': self.task_queue,
-                    'total_tasks': len(tasks_list)
-                })
-        
-        @self.app.route('/api/submit', methods=['POST', 'OPTIONS'])
-        def api_submit():
-            if request.method == 'OPTIONS':
-                return '', 200
-            
-            response_headers = {
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'POST, OPTIONS',
-                'Access-Control-Allow-Headers': 'Content-Type, Authorization, Accept'
-            }
-            
-            try:
-                if not request.is_json:
-                    return jsonify({
-                        'status': 'error',
-                        'message': 'Content-Type должен быть application/json'
-                    }), 400, response_headers
-                
-                data = request.get_json() or {}
-                task_type = data.get('type', 'matrix_mult')
-                task_data = data.get('data', {})
-                
-                task_id = self._create_task(task_type, task_data)
-                
-                return jsonify({
-                    'status': 'success',
-                    'task_id': task_id,
-                    'message': 'Задача создана',
-                    'type': task_type
-                }), 200, response_headers
-            except Exception as e:
-                return jsonify({
-                    'status': 'error',
-                    'message': str(e),
-                    'error_type': type(e).__name__
-                }), 400, response_headers
-        
-        @self.app.route('/api/workers', methods=['GET', 'OPTIONS'])
-        def api_workers():
-            if request.method == 'OPTIONS':
-                return '', 200
-            with self.lock:
-                workers = []
-                for worker_id, worker in self.workers.items():
-                    workers.append({
-                        'id': worker_id[:8],
-                        'name': worker.get('name', 'unknown'),
-                        'address': f"{worker['addr'][0]}:{worker['addr'][1]}",
-                        'status': worker.get('status', 'unknown'),
-                        'last_seen': worker.get('last_seen', time.time()),
-                        'current_task': worker.get('current_task'),
-                        'capabilities': worker.get('capabilities', {})
-                    })
-                
-                return jsonify({
-                    'workers': workers,
-                    'total_workers': len(workers),
-                    'connected_workers': len([w for w in workers if w['status'] == 'connected'])
-                })
-        
-        @self.app.route('/api/health', methods=['GET', 'OPTIONS'])
-        def api_health():
-            if request.method == 'OPTIONS':
-                return '', 200
-            
-            return jsonify({
-                'status': 'healthy',
-                'timestamp': time.time(),
-                'service': 'ai-network-coordinator',
-                'version': '1.0.0',
-                'host': self.public_host,
-                'port': self.web_port
-            })
-        
-        @self.app.route('/api/test', methods=['GET', 'OPTIONS'])
-        def api_test():
-            if request.method == 'OPTIONS':
-                return '', 200
-            return jsonify({
-                'message': 'CORS работает!',
-                'method': request.method,
-                'origin': request.headers.get('Origin', 'none'),
-                'timestamp': time.time()
-            })
-    
-    def _get_web_interface(self):
-        """Генерация веб-интерфейса координатора"""
-        html = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>🤖 AI Network - Координатор</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {{ font-family: Arial, sans-serif; margin: 40px; background: #0f3460; color: white; }}
-                .container {{ max-width: 1200px; margin: 0 auto; }}
-                .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                          color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }}
-                .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }}
-                .card {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; backdrop-filter: blur(10px); }}
-                .stat {{ font-size: 2em; font-weight: bold; color: #4cc9f0; }}
-                .btn {{ background: #4cc9f0; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }}
-                .api-info {{ background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; margin-top: 30px; }}
-                code {{ background: rgba(0,0,0,0.3); padding: 2px 5px; border-radius: 3px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🤖 AI Network Coordinator</h1>
-                    <p>Децентрализованная сеть распределенных вычислений</p>
-                    <p>Публичный адрес: <code>{self.public_host}:{self.web_port}</code></p>
-                </div>
-                
-                <div class="cards">
-                    <div class="card">
-                        <h3>🌐 Сеть</h3>
-                        <p>Web интерфейс: <code>{self.public_host}:{self.web_port}</code></p>
-                        <p>Порт рабочих: <code>{self.worker_port}</code></p>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>📊 Статистика</h3>
-                        <div class="stat" id="workersCount">0</div>
-                        <p>Активных рабочих</p>
-                        <div class="stat" id="tasksCount">0</div>
-                        <p>Всего задач</p>
-                    </div>
-                    
-                    <div class="card">
-                        <h3>🔧 Управление</h3>
-                        <button class="btn" onclick="loadStats()">Обновить</button>
-                        <button class="btn" onclick="testAPI()">Тест API</button>
-                        <button class="btn" onclick="createTestTask()">Тест задача</button>
-                    </div>
-                </div>
-                
-                <div class="api-info">
-                    <h3>📡 API Endpoints</h3>
-                    <p><code>GET /api/status</code> - Статус координатора</p>
-                    <p><code>GET /api/stats</code> - Статистика сети</p>
-                    <p><code>GET /api/tasks</code> - Список задач</p>
-                    <p><code>GET /api/workers</code> - Список рабочих</p>
-                    <p><code>POST /api/submit</code> - Отправить задачу</p>
-                    <p><code>GET /api/health</code> - Проверка здоровья</p>
-                    <p><code>GET /api/test</code> - Тест CORS</p>
-                </div>
-            </div>
-            
-            <script>
-                async function loadStats() {{
-                    try {{
-                        const response = await fetch('/api/stats');
-                        const data = await response.json();
-                        document.getElementById('workersCount').textContent = data.workers_count || 0;
-                        document.getElementById('tasksCount').textContent = data.tasks_total || 0;
-                    }} catch (error) {{
-                        console.error('Ошибка:', error);
-                    }}
-                }}
-                
-                async function testAPI() {{
-                    try {{
-                        const response = await fetch('/api/test');
-                        const data = await response.json();
-                        alert('API работает: ' + data.message);
-                    }} catch (error) {{
-                        alert('Ошибка API: ' + error.message);
-                    }}
-                }}
-                
-                async function createTestTask() {{
-                    try {{
-                        const response = await fetch('/api/submit', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify({{
-                                type: 'matrix_mult',
-                                data: {{ size: 5 }}
-                            }})
-                        }});
-                        const data = await response.json();
-                        alert('Задача создана: ' + data.task_id);
-                    }} catch (error) {{
-                        alert('Ошибка: ' + error.message);
-                    }}
-                }}
-                
-                // Загружаем статистику при старте и каждые 5 сек
-                loadStats();
-                setInterval(loadStats, 5000);
-            </script>
-        </body>
-        </html>
-        """
-        return html
+        logger.info(f"Порт для рабочих: {self.worker_port}")
+        logger.info(f"API порт: {self.api_port}")
     
     def _get_stats(self) -> Dict[str, Any]:
         """Получить статистику сети"""
-        with self.lock:
-            tasks_pending = len([t for t in self.tasks.values() if t.get('status') == 'pending'])
-            tasks_running = len([t for t in self.tasks.values() if t.get('status') == 'running'])
-            tasks_completed = len([t for t in self.tasks.values() if t.get('status') == 'completed'])
-            tasks_failed = len([t for t in self.tasks.values() if t.get('status') == 'failed'])
-            
-            connected_workers = len([w for w in self.workers.values() if w.get('status') == 'connected'])
-            
-            return {
-                'workers_count': connected_workers,
-                'total_workers': len(self.workers),
-                'tasks_total': len(self.tasks),
-                'tasks_pending': tasks_pending,
-                'tasks_running': tasks_running,
-                'tasks_completed': tasks_completed,
-                'tasks_failed': tasks_failed,
-                'queue_length': len(self.task_queue),
-                'timestamp': time.time(),
-                'coordinator_uptime': time.time() - getattr(self, 'start_time', time.time()),
-                'public_host': self.public_host,
-                'web_port': self.web_port
-            }
+        tasks_pending = len([t for t in self.tasks.values() if t.get('status') == 'pending'])
+        tasks_running = len([t for t in self.tasks.values() if t.get('status') == 'running'])
+        tasks_completed = len([t for t in self.tasks.values() if t.get('status') == 'completed'])
+        tasks_failed = len([t for t in self.tasks.values() if t.get('status') == 'failed'])
+        
+        connected_workers = len([w for w in self.workers.values() if w.get('status') == 'connected'])
+        
+        return {
+            'workers_count': connected_workers,
+            'total_workers': len(self.workers),
+            'tasks_total': len(self.tasks),
+            'tasks_pending': tasks_pending,
+            'tasks_running': tasks_running,
+            'tasks_completed': tasks_completed,
+            'tasks_failed': tasks_failed,
+            'queue_length': len(self.task_queue),
+            'timestamp': time.time(),
+            'coordinator_uptime': time.time() - self.start_time,
+            'public_host': self.public_host,
+            'api_port': self.api_port,
+            'worker_port': self.worker_port
+        }
     
     def _create_task(self, task_type: str, task_data: Dict) -> str:
         """Создать новую задачу"""
@@ -558,9 +501,7 @@ class NetworkCoordinator:
             self.task_queue.append(task_id)
         
         logger.info(f"Создана задача {task_id} типа {task_type}")
-        
         self._assign_tasks()
-        
         return task_id
     
     def _assign_tasks(self):
@@ -589,9 +530,7 @@ class NetworkCoordinator:
                         task['status'] = 'running'
                         task['worker'] = worker_id
                         task['started'] = time.time()
-                        
                         self.workers[worker_id]['current_task'] = task_id
-                        
                         logger.info(f"Задача {task_id} назначена рабочему {worker_id}")
     
     def _send_task_to_worker(self, worker_id: str, task_id: str, task: Dict) -> bool:
@@ -601,7 +540,6 @@ class NetworkCoordinator:
                 worker = self.workers.get(worker_id)
                 if not worker:
                     return False
-                
                 conn = worker.get('conn')
                 if not conn:
                     return False
@@ -616,7 +554,6 @@ class NetworkCoordinator:
             
             message = json.dumps(task_message).encode()
             conn.sendall(message)
-            
             return True
             
         except Exception as e:
@@ -629,7 +566,6 @@ class NetworkCoordinator:
         
         logger.info(f"Новое подключение рабочего: {worker_id}")
         
-        # Регистрируем рабочего
         with self.lock:
             self.workers[worker_id] = {
                 'conn': conn,
@@ -652,33 +588,27 @@ class NetworkCoordinator:
                 'message': 'Добро пожаловать в AI Network!',
                 'timestamp': time.time(),
                 'coordinator': self.public_host,
-                'web_port': self.web_port
+                'api_port': self.api_port
             }
-            welcome_json = json.dumps(welcome_msg)
-            conn.sendall(welcome_json.encode())
+            conn.sendall(json.dumps(welcome_msg).encode())
             
             # Основной цикл обработки
             buffer = ""
             while self.running:
                 try:
                     data = conn.recv(4096)
-                    
                     if not data:
                         logger.info(f"Рабочий {worker_id} отключился")
                         break
                     
                     buffer += data.decode('utf-8', errors='ignore')
-                    
-                    # Обрабатываем все полные сообщения в буфере
                     messages = self._extract_json_messages(buffer)
                     
                     for message in messages:
                         self._process_worker_message(worker_id, conn, message)
                     
-                    # Очищаем буфер от обработанных сообщений
                     buffer = self._clean_buffer(buffer)
                     
-                    # Обновляем время последней активности
                     with self.lock:
                         if worker_id in self.workers:
                             self.workers[worker_id]['last_seen'] = time.time()
@@ -721,7 +651,7 @@ class NetworkCoordinator:
                         try:
                             message = json.loads(buffer[start:i+1])
                             messages.append(message)
-                        except json.JSONDecodeError:
+                        except:
                             pass
                 elif char == '"':
                     in_string = True
@@ -745,7 +675,9 @@ class NetworkCoordinator:
     def _process_worker_message(self, worker_id: str, conn: socket.socket, message: Dict):
         """Обработать сообщение от рабочего"""
         try:
-            if message.get('type') == 'heartbeat':
+            msg_type = message.get('type')
+            
+            if msg_type == 'heartbeat':
                 with self.lock:
                     if worker_id in self.workers:
                         self.workers[worker_id]['last_seen'] = time.time()
@@ -753,14 +685,14 @@ class NetworkCoordinator:
                 ack = {'type': 'heartbeat_ack', 'timestamp': time.time()}
                 conn.sendall(json.dumps(ack).encode())
                 
-            elif message.get('type') == 'capabilities':
+            elif msg_type == 'capabilities':
                 with self.lock:
                     if worker_id in self.workers:
                         self.workers[worker_id]['capabilities'] = message.get('capabilities', {})
                         self.workers[worker_id]['name'] = message.get('name', self.workers[worker_id]['name'])
                         logger.info(f"Обновлены данные рабочего {worker_id}: {self.workers[worker_id]['name']}")
                 
-            elif message.get('type') == 'result':
+            elif msg_type == 'result':
                 task_id = message.get('task_id')
                 result = message.get('result', {})
                 
@@ -837,10 +769,10 @@ class NetworkCoordinator:
             
             try:
                 server.bind(("::", self.worker_port))
-                logger.info(f"Сервер привязан к [::]:{self.worker_port} (IPv6)")
+                logger.info(f"Сервер для рабочих привязан к [::]:{self.worker_port} (IPv6)")
             except:
                 server.bind(("0.0.0.0", self.worker_port))
-                logger.info(f"Сервер привязан к 0.0.0.0:{self.worker_port} (IPv4)")
+                logger.info(f"Сервер для рабочих привязан к 0.0.0.0:{self.worker_port} (IPv4)")
             
             server.listen(10)
             server.settimeout(1)
@@ -866,64 +798,68 @@ class NetworkCoordinator:
                         logger.error(f"Ошибка принятия соединения: {e}")
         
         except Exception as e:
-            logger.error(f"Ошибка запуска сервера: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Ошибка запуска сервера для рабочих: {e}")
             self.running = False
     
+    def _run_api_server(self):
+        """Запуск HTTP API сервера"""
+        try:
+            handler = lambda *args, **kwargs: APIHandler(*args, coordinator=self, **kwargs)
+            self.http_server = HTTPServer((self.host, self.api_port), handler)
+            
+            logger.info(f"HTTP API сервер запущен на {self.host}:{self.api_port}")
+            logger.info(f"API доступен по адресу: http://{self.public_host}:{self.api_port}")
+            
+            self.http_server.serve_forever()
+            
+        except Exception as e:
+            logger.error(f"Ошибка запуска HTTP API сервера: {e}")
+            self.running = False
+    
+    def _task_processor_loop(self):
+        """Цикл обработки задач"""
+        while self.running:
+            try:
+                self._assign_tasks()
+                time.sleep(2)
+            except Exception as e:
+                logger.error(f"Ошибка обработчика задач: {e}")
+                time.sleep(5)
+    
     def start(self):
-        """Запуск координатора - ИСПРАВЛЕННЫЙ МЕТОД"""
+        """Запуск координатора"""
         self.running = True
         self.start_time = time.time()
         
         logger.info("=" * 60)
-        logger.info("🚀 ЗАПУСК AI NETWORK COORDINATOR")
+        logger.info("🚀 ЗАПУСК AI NETWORK COORDINATOR (БЕЗ FLASK)")
         logger.info("=" * 60)
-        logger.info(f"🌐 Веб-интерфейс: http://{self.public_host}:{self.web_port}")
+        logger.info(f"🌐 API интерфейс: http://{self.public_host}:{self.api_port}")
         logger.info(f"📡 Порт для рабочих: {self.worker_port}")
         logger.info(f"🔗 Адрес для рабочих: {self.public_host}:{self.worker_port}")
-        logger.info(f"🏠 Слушаем на: {self.host}:{self.web_port}")
-        logger.info(f"✅ CORS: {'Enabled' if CORS_AVAILABLE else 'Manual headers'}")
+        logger.info(f"🏠 Слушаем на: {self.host}")
         logger.info("=" * 60)
         
-        # Запускаем все серверы в отдельных потоках
-        worker_server_thread = threading.Thread(target=self._run_worker_server, daemon=True)
-        worker_server_thread.start()
+        # Запускаем сервер для рабочих
+        worker_thread = threading.Thread(target=self._run_worker_server, daemon=True)
+        worker_thread.start()
         
+        # Запускаем очистку неактивных рабочих
         cleanup_thread = threading.Thread(target=self._cleanup_inactive_workers, daemon=True)
         cleanup_thread.start()
         
-        task_processor_thread = threading.Thread(target=self._task_processor_loop, daemon=True)
-        task_processor_thread.start()
+        # Запускаем обработчик задач
+        task_thread = threading.Thread(target=self._task_processor_loop, daemon=True)
+        task_thread.start()
+        
+        # Запускаем HTTP API сервер
+        api_thread = threading.Thread(target=self._run_api_server, daemon=True)
+        api_thread.start()
         
         try:
-            # Ждем 2 секунды перед запуском Flask
-            time.sleep(2)
-            
-            # ВАЖНОЕ ИСПРАВЛЕНИЕ: Запускаем Flask в отдельном потоке
-            def run_flask():
-                """Запуск Flask в отдельном потоке"""
-                import warnings
-                warnings.filterwarnings("ignore", message=".*Werkzeug.*")
-                
-                logger.info(f"🚀 Запуск Flask на порту {self.web_port}")
-                try:
-                    self.app.run(
-                        host=self.host,
-                        port=self.web_port,
-                        debug=False,
-                        use_reloader=False,
-                        threaded=True
-                    )
-                except Exception as e:
-                    logger.error(f"❌ Ошибка Flask: {e}")
-                    self.running = False
-            
-            flask_thread = threading.Thread(target=run_flask, daemon=True)
-            flask_thread.start()
-            
             logger.info("✅ Система запущена и готова к работе!")
             logger.info("👷 Ожидание подключения рабочих узлов...")
+            logger.info("📡 Ожидание API запросов...")
             
             # Основной цикл - держим программу запущенной
             while self.running:
@@ -935,19 +871,11 @@ class NetworkCoordinator:
             logger.error(f"Ошибка: {e}")
         finally:
             self.running = False
+            if self.http_server:
+                self.http_server.shutdown()
             logger.info("Координатор остановлен")
-    
-    def _task_processor_loop(self):
-        """Цикл обработки задач"""
-        while self.running:
-            try:
-                self._assign_tasks()
-                time.sleep(2)
-            except Exception as e:
-                logger.error(f"Ошибка обработчика задач: {e}")
-                time.sleep(5)
 
-# ========== РАБОЧИЙ УЗЕЛ (оставляем без изменений) ==========
+# ========== РАБОЧИЙ УЗЕЛ (без изменений) ==========
 class WorkerNode:
     """Рабочий узел для выполнения задач"""
     
@@ -1254,7 +1182,7 @@ class WorkerNode:
                         try:
                             message = json.loads(buffer[start:i+1])
                             messages.append(message)
-                        except json.JSONDecodeError:
+                        except:
                             pass
                 elif char == '"':
                     in_string = True
@@ -1319,10 +1247,63 @@ class WorkerNode:
         
         logger.info("👷 Рабочий узел остановлен")
 
+# ========== КЛИЕНТ ДЛЯ ОТПРАВКИ ЗАДАЧ ==========
+class APIClient:
+    """Простой клиент для отправки задач через HTTP API"""
+    
+    def __init__(self, host: str = "185.185.142.113", port: int = 8080):
+        self.base_url = f"http://{host}:{port}"
+    
+    def submit_task(self, task_type: str, task_data: Dict) -> Optional[str]:
+        """Отправить задачу на выполнение"""
+        import urllib.request
+        import json
+        
+        url = f"{self.base_url}/api/submit"
+        data = json.dumps({
+            'type': task_type,
+            'data': task_data
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            method='POST'
+        )
+        
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result.get('status') == 'success':
+                    return result.get('task_id')
+                else:
+                    print(f"Ошибка: {result.get('message')}")
+                    return None
+        except Exception as e:
+            print(f"Ошибка подключения: {e}")
+            return None
+    
+    def get_status(self) -> Optional[Dict]:
+        """Получить статус координатора"""
+        import urllib.request
+        import json
+        
+        url = f"{self.base_url}/api/status"
+        
+        try:
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return json.loads(response.read().decode('utf-8'))
+        except:
+            return None
+
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 def main():
     parser = argparse.ArgumentParser(
-        description="🚀 Децентрализованная AI сеть - Координатор и рабочие узлы",
+        description="🚀 Децентрализованная AI сеть - Координатор и рабочие узлы (без Flask)",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
@@ -1333,27 +1314,28 @@ def main():
     parser.add_argument('--host', default=None,
                        help='Адрес сервера (для рабочего) или хост (для координатора)')
     parser.add_argument('--port', type=int, default=8888,
-                       help='Порт сервера (по умолчанию: 8888)')
-    parser.add_argument('--web-port', type=int, default=8080,  # Изменено на 8080
-                       help='Порт веб-интерфейса (по умолчанию: 8080)')
+                       help='Порт для рабочих (по умолчанию: 8888)')
+    parser.add_argument('--api-port', type=int, default=8080,
+                       help='Порт HTTP API (по умолчанию: 8080)')
     parser.add_argument('--name', 
                        help='Имя рабочего узла')
+    parser.add_argument('--submit', nargs='?', const='matrix_mult',
+                       help='Отправить тестовую задачу (тип: matrix_mult, calculation, nn_inference)')
     
     args = parser.parse_args()
     
     if args.coordinator:
-        # Важное исправление: используем 0.0.0.0 чтобы слушать на всех интерфейсах
         coordinator = NetworkCoordinator(
-            host="0.0.0.0",  # Всегда слушаем на всех интерфейсах
+            host="0.0.0.0",
             worker_port=args.port,
-            web_port=args.web_port
+            api_port=args.api_port
         )
         coordinator.start()
     
     elif args.worker:
         if not args.host:
             print("❌ Для запуска рабочего узла необходимо указать --host")
-            print("Пример: python ai_network_fixed.py --worker --host 185.185.142.113 --name 'MyPC'")
+            print("Пример: python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
             return
         
         worker = WorkerNode(
@@ -1363,40 +1345,70 @@ def main():
         )
         worker.start()
     
+    elif args.submit:
+        # Отправка задачи через API клиент
+        client = APIClient(host=args.host if args.host else "185.185.142.113", 
+                          port=args.api_port)
+        
+        task_type = args.submit
+        task_data = {}
+        
+        if task_type == 'matrix_mult':
+            task_data = {'size': 10}
+        elif task_type == 'calculation':
+            task_data = {'numbers': 1000}
+        elif task_type == 'nn_inference':
+            task_data = {'input_size': 10}
+        
+        print(f"📨 Отправка задачи типа '{task_type}'...")
+        task_id = client.submit_task(task_type, task_data)
+        
+        if task_id:
+            print(f"✅ Задача отправлена: {task_id}")
+            print(f"📊 Проверить статус: http://{args.host if args.host else '185.185.142.113'}:{args.api_port}/api/tasks")
+        else:
+            print("❌ Не удалось отправить задачу")
+    
     else:
         print("=" * 70)
-        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ v1.0 - ИСПРАВЛЕННАЯ ВЕРСИЯ")
+        print("🤖 ДЕЦЕНТРАЛИЗОВАННАЯ AI СЕТЬ v1.0 - БЕЗ FLASK")
         print("=" * 70)
         print()
         print("КОМАНДЫ:")
         print("  --coordinator           Запустить координатор сети")
         print("  --worker                Запустить рабочий узел")
+        print("  --submit [тип]          Отправить тестовую задачу")
         print()
         print("ПРИМЕРЫ:")
         print("  1. Запуск координатора:")
-        print("     python ai_network_fixed.py --coordinator --port 8888 --web-port 8080")
+        print("     python ai_network.py --coordinator --port 8888 --api-port 8080")
         print()
         print("  2. Подключение рабочего:")
-        print("     python ai_network_fixed.py --worker --host 185.185.142.113 --name 'MyPC'")
+        print("     python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
         print()
-        print("📡 Публичный API (если запущен на VPS):")
+        print("  3. Отправить задачу:")
+        print("     python ai_network.py --submit matrix_mult")
+        print("     python ai_network.py --submit calculation")
+        print("     python ai_network.py --submit nn_inference")
+        print()
+        print("📡 Публичный API:")
         print(f"    • Проверка: GET http://185.185.142.113:8080/api/health")
         print(f"    • Статус: GET http://185.185.142.113:8080/api/status")
         print(f"    • Задачи: GET http://185.185.142.113:8080/api/tasks")
         print(f"    • Отправить: POST http://185.185.142.113:8080/api/submit")
         print("=" * 70)
         
-        choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, Enter - выход): ")
+        choice = input("\nВыберите режим (1 - координатор, 2 - рабочий, 3 - отправить задачу, Enter - выход): ")
         
         if choice == '1':
             host = input(f"Хост координатора [0.0.0.0]: ") or "0.0.0.0"
             port = input("Порт для рабочих [8888]: ") or "8888"
-            web_port = input("Порт веб-интерфейса [8080]: ") or "8080"
+            api_port = input("Порт HTTP API [8080]: ") or "8080"
             
             coordinator = NetworkCoordinator(
                 host=host,
                 worker_port=int(port),
-                web_port=int(web_port)
+                api_port=int(api_port)
             )
             coordinator.start()
         
@@ -1414,6 +1426,42 @@ def main():
                 name=name
             )
             worker.start()
+        
+        elif choice == '3':
+            print("Тип задачи:")
+            print("  1. Умножение матриц")
+            print("  2. Вычисления")
+            print("  3. Инференс нейросети")
+            
+            task_choice = input("Выберите тип (1-3): ").strip()
+            
+            if task_choice == '1':
+                task_type = 'matrix_mult'
+                size = input("Размер матрицы [10]: ") or "10"
+                task_data = {'size': int(size)}
+            elif task_choice == '2':
+                task_type = 'calculation'
+                numbers = input("Количество чисел [1000]: ") or "1000"
+                task_data = {'numbers': int(numbers)}
+            elif task_choice == '3':
+                task_type = 'nn_inference'
+                input_size = input("Размер входа [10]: ") or "10"
+                task_data = {'input_size': int(input_size)}
+            else:
+                print("❌ Неверный выбор")
+                return
+            
+            host = input(f"Адрес координатора [185.185.142.113]: ") or "185.185.142.113"
+            port = input(f"Порт API [8080]: ") or "8080"
+            
+            client = APIClient(host=host, port=int(port))
+            task_id = client.submit_task(task_type, task_data)
+            
+            if task_id:
+                print(f"✅ Задача отправлена: {task_id}")
+                print(f"📊 Проверить статус: http://{host}:{port}/api/tasks")
+            else:
+                print("❌ Не удалось отправить задачу")
 
 if __name__ == "__main__":
     try:
