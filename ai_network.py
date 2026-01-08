@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-🚀 AI Network - Упрощенная рабочая версия
-Все через один порт 8888, без Flask, без HTTP
+🚀 AI Network - Ультраупрощенная рабочая версия
+Один порт 8888, чистые сокеты, без лишней сложности
 """
 
 import socket
@@ -11,39 +11,26 @@ import time
 import random
 import math
 import hashlib
-import logging
 import argparse
 import sys
-import uuid
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
-from enum import Enum
+import uuid
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger("AI-Network")
+# ========== КОНСТАНТЫ ==========
+VPS_IP = "185.185.142.113"
+PORT = 8888
 
 # ========== ДАТА-КЛАССЫ ==========
-class TaskType(Enum):
-    MATRIX_MULT = "matrix_mult"
-    CALCULATION = "calculation"
-    NN_INFERENCE = "nn_inference"
-
 @dataclass
 class Task:
     id: str
-    type: TaskType
+    type: str  # "matrix_mult", "calculation"
     data: Dict
     status: str = "pending"  # pending, running, completed, failed
     created: float = None
     worker_id: str = None
     result: Dict = None
-    started: float = None
-    completed: float = None
     
     def __post_init__(self):
         if self.created is None:
@@ -58,271 +45,243 @@ class Worker:
     status: str = "connected"
     last_seen: float = None
     current_task: str = None
-    capabilities: Dict = None
     
     def __post_init__(self):
         if self.last_seen is None:
             self.last_seen = time.time()
-        if self.capabilities is None:
-            self.capabilities = {}
 
 # ========== КООРДИНАТОР ==========
-class NetworkCoordinator:
-    """Упрощенный координатор - все через сокеты на одном порту"""
+class SimpleCoordinator:
+    """Самый простой координатор - только самое необходимое"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8888):
-        self.host = host
+    def __init__(self, port: int = PORT):
         self.port = port
-        self.public_ip = "185.185.142.113"
-        
-        # Хранилища
         self.workers: Dict[str, Worker] = {}
         self.tasks: Dict[str, Task] = {}
-        self.task_queue: List[str] = []  # Очередь task_id
-        
-        # Синхронизация
+        self.task_queue: List[str] = []
         self.lock = threading.RLock()
         self.running = False
+        self.server_socket = None
         
-        # Статистика
-        self.stats = {
-            "start_time": time.time(),
-            "tasks_processed": 0,
-            "workers_connected": 0
-        }
-        
-        logger.info(f"Координатор инициализирован на {host}:{port}")
+        print(f"🚀 Координатор на порту {port}")
     
-    def _create_socket(self) -> socket.socket:
-        """Создать и настроить сокет"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.settimeout(1)  # Таймаут для accept
-        return sock
-    
-    def _send_json(self, conn: socket.socket, data: Dict):
+    def _send_json(self, conn: socket.socket, data: Dict) -> bool:
         """Отправить JSON через сокет"""
         try:
-            json_str = json.dumps(data, ensure_ascii=False)
-            conn.sendall(json_str.encode('utf-8'))
+            json_str = json.dumps(data)
+            conn.sendall(json_str.encode())
             return True
-        except Exception as e:
-            logger.error(f"Ошибка отправки JSON: {e}")
+        except:
             return False
     
-    def _receive_json(self, conn: socket.socket, timeout: int = 5) -> Optional[Dict]:
-        """Получить JSON из сокета"""
+    def _receive_json(self, conn: socket.socket) -> Optional[Dict]:
+        """Получить JSON из сокета (упрощенно)"""
         try:
-            conn.settimeout(timeout)
-            buffer = b""
-            
-            while True:
-                chunk = conn.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                
-                # Пробуем распарсить JSON
-                try:
-                    data = json.loads(buffer.decode('utf-8', errors='ignore'))
-                    return data
-                except json.JSONDecodeError:
-                    # Неполный JSON, продолжаем чтение
-                    continue
-                    
-        except socket.timeout:
-            logger.debug("Таймаут приема данных")
-        except Exception as e:
-            logger.error(f"Ошибка приема JSON: {e}")
-        
+            conn.settimeout(2)
+            data = conn.recv(4096)
+            if data:
+                return json.loads(data.decode())
+        except:
+            pass
         return None
     
-    def _create_task(self, task_type: str, task_data: Dict) -> str:
-        """Создать новую задачу"""
-        task_id = f"task_{uuid.uuid4().hex[:8]}"
+    def _handle_connection(self, conn: socket.socket, addr: tuple):
+        """Обработка подключения"""
+        worker_id = f"worker_{addr[0]}_{addr[1]}_{int(time.time())}"
         
-        with self.lock:
-            task = Task(
-                id=task_id,
-                type=TaskType(task_type),
-                data=task_data,
-                created=time.time()
-            )
-            self.tasks[task_id] = task
-            self.task_queue.append(task_id)
-            
-            self.stats["tasks_processed"] += 1
+        print(f"📡 Подключение от {addr[0]}:{addr[1]}")
         
-        logger.info(f"Создана задача {task_id}: {task_type}")
-        return task_id
-    
-    def _assign_task_to_worker(self, worker_id: str, task_id: str) -> bool:
-        """Назначить задачу рабочему"""
-        with self.lock:
-            if worker_id not in self.workers:
-                return False
-            
-            if task_id not in self.tasks:
-                return False
-            
-            worker = self.workers[worker_id]
-            task = self.tasks[task_id]
-            
-            # Если рабочий уже занят
-            if worker.current_task:
-                return False
-            
-            # Если задача уже выполняется
-            if task.status != "pending":
-                return False
-            
-            # Отправляем задачу рабочему
-            task_message = {
-                "type": "task",
-                "task_id": task_id,
-                "task_type": task.type.value,
-                "data": task.data,
-                "timestamp": time.time()
-            }
-            
-            if self._send_json(worker.conn, task_message):
-                task.status = "running"
-                task.worker_id = worker_id
-                task.started = time.time()
-                worker.current_task = task_id
-                
-                # Удаляем из очереди
-                if task_id in self.task_queue:
-                    self.task_queue.remove(task_id)
-                
-                logger.info(f"Задача {task_id} назначена рабочему {worker_id}")
-                return True
-        
-        return False
-    
-    def _process_worker_message(self, worker_id: str, conn: socket.socket, message: Dict):
-        """Обработать сообщение от рабочего"""
         try:
-            msg_type = message.get("type")
+            # Создаем рабочего
+            worker = Worker(
+                id=worker_id,
+                name=f"Worker_{worker_id[-6:]}",
+                addr=addr,
+                conn=conn,
+                last_seen=time.time()
+            )
             
-            if msg_type == "register":
-                # Регистрация рабочего
-                worker_name = message.get("name", f"Worker_{worker_id[:6]}")
-                capabilities = message.get("capabilities", {})
-                
-                with self.lock:
-                    if worker_id in self.workers:
-                        worker = self.workers[worker_id]
-                        worker.name = worker_name
-                        worker.capabilities = capabilities
-                        worker.last_seen = time.time()
+            with self.lock:
+                self.workers[worker_id] = worker
+            
+            # Отправляем приветствие
+            self._send_json(conn, {
+                "type": "welcome",
+                "worker_id": worker_id,
+                "message": "Connected to AI Network",
+                "timestamp": time.time()
+            })
+            
+            # Основной цикл
+            while self.running:
+                try:
+                    # Получаем сообщение
+                    message = self._receive_json(conn)
+                    
+                    if not message:
+                        # Проверяем соединение
+                        try:
+                            conn.send(b"ping")
+                            continue
+                        except:
+                            break
+                    
+                    msg_type = message.get("type")
+                    
+                    if msg_type == "register":
+                        # Регистрация рабочего
+                        worker_name = message.get("name", f"Worker_{worker_id[-6:]}")
+                        with self.lock:
+                            if worker_id in self.workers:
+                                self.workers[worker_id].name = worker_name
+                                self.workers[worker_id].last_seen = time.time()
                         
-                        logger.info(f"Рабочий зарегистрирован: {worker_name}")
+                        print(f"✅ Зарегистрирован: {worker_name}")
                         
-                        # Отправляем подтверждение
-                        response = {
-                            "type": "welcome",
+                        self._send_json(conn, {
+                            "type": "registered",
                             "worker_id": worker_id,
-                            "message": f"Добро пожаловать, {worker_name}!",
-                            "timestamp": time.time(),
-                            "coordinator": self.public_ip
-                        }
-                        self._send_json(conn, response)
-            
-            elif msg_type == "heartbeat":
-                # Обновляем время последней активности
-                with self.lock:
-                    if worker_id in self.workers:
-                        self.workers[worker_id].last_seen = time.time()
-                
-                # Отправляем подтверждение
-                response = {"type": "heartbeat_ack", "timestamp": time.time()}
-                self._send_json(conn, response)
-            
-            elif msg_type == "task_result":
-                # Результат выполнения задачи
-                task_id = message.get("task_id")
-                result = message.get("result", {})
-                
-                with self.lock:
-                    if worker_id in self.workers:
-                        self.workers[worker_id].current_task = None
-                        self.workers[worker_id].last_seen = time.time()
-                    
-                    if task_id in self.tasks:
-                        task = self.tasks[task_id]
-                        
-                        if result.get("status") == "success":
-                            task.status = "completed"
-                            task.result = result
-                            task.completed = time.time()
-                            logger.info(f"Задача {task_id} успешно выполнена")
-                        else:
-                            task.status = "failed"
-                            task.result = result
-                            logger.warning(f"Задача {task_id} провалена")
-                
-                # Пытаемся назначить следующую задачу
-                self._assign_pending_tasks()
-            
-            elif msg_type == "submit_task":
-                # Рабочий может также отправлять задачи (как клиент)
-                task_type = message.get("task_type")
-                task_data = message.get("data", {})
-                
-                if task_type:
-                    task_id = self._create_task(task_type, task_data)
-                    
-                    response = {
-                        "type": "task_submitted",
-                        "task_id": task_id,
-                        "status": "success",
-                        "timestamp": time.time()
-                    }
-                    self._send_json(conn, response)
-                    
-                    # Пытаемся сразу назначить
-                    self._assign_pending_tasks()
-            
-            elif msg_type == "get_stats":
-                # Запрос статистики
-                stats = self._get_stats()
-                response = {
-                    "type": "stats",
-                    "stats": stats,
-                    "timestamp": time.time()
-                }
-                self._send_json(conn, response)
-            
-            elif msg_type == "get_tasks":
-                # Запрос списка задач
-                tasks_list = []
-                with self.lock:
-                    for task_id, task in self.tasks.items():
-                        tasks_list.append({
-                            "id": task.id,
-                            "type": task.type.value,
-                            "status": task.status,
-                            "created": task.created,
-                            "worker_id": task.worker_id
+                            "name": worker_name,
+                            "timestamp": time.time()
                         })
-                
-                response = {
-                    "type": "tasks_list",
-                    "tasks": tasks_list,
-                    "timestamp": time.time()
-                }
-                self._send_json(conn, response)
+                    
+                    elif msg_type == "heartbeat":
+                        # Heartbeat
+                        with self.lock:
+                            if worker_id in self.workers:
+                                self.workers[worker_id].last_seen = time.time()
+                        
+                        self._send_json(conn, {
+                            "type": "heartbeat_ack",
+                            "timestamp": time.time()
+                        })
+                    
+                    elif msg_type == "submit_task":
+                        # Клиент отправляет задачу
+                        task_type = message.get("task_type")
+                        task_data = message.get("data", {})
+                        
+                        if task_type:
+                            # Создаем задачу
+                            task_id = f"task_{uuid.uuid4().hex[:8]}"
+                            
+                            with self.lock:
+                                task = Task(
+                                    id=task_id,
+                                    type=task_type,
+                                    data=task_data,
+                                    created=time.time()
+                                )
+                                self.tasks[task_id] = task
+                                self.task_queue.append(task_id)
+                            
+                            print(f"📨 Создана задача {task_id}: {task_type}")
+                            
+                            # Отправляем подтверждение
+                            self._send_json(conn, {
+                                "type": "task_created",
+                                "task_id": task_id,
+                                "status": "created",
+                                "timestamp": time.time()
+                            })
+                            
+                            # Пытаемся назначить задачу
+                            self._assign_tasks()
+                    
+                    elif msg_type == "task_result":
+                        # Результат выполнения задачи
+                        task_id = message.get("task_id")
+                        result = message.get("result", {})
+                        
+                        with self.lock:
+                            if worker_id in self.workers:
+                                self.workers[worker_id].current_task = None
+                                self.workers[worker_id].last_seen = time.time()
+                            
+                            if task_id in self.tasks:
+                                task = self.tasks[task_id]
+                                
+                                if result.get("status") == "success":
+                                    task.status = "completed"
+                                    task.result = result
+                                    print(f"✅ Задача {task_id} выполнена")
+                                else:
+                                    task.status = "failed"
+                                    task.result = result
+                                    print(f"❌ Задача {task_id} провалена")
+                        
+                        # Пытаемся назначить следующую задачу
+                        self._assign_tasks()
+                    
+                    elif msg_type == "get_stats":
+                        # Запрос статистики
+                        stats = self._get_stats()
+                        self._send_json(conn, {
+                            "type": "stats",
+                            "stats": stats,
+                            "timestamp": time.time()
+                        })
+                    
+                    elif msg_type == "get_tasks":
+                        # Запрос списка задач
+                        tasks_list = []
+                        with self.lock:
+                            for task_id, task in self.tasks.items():
+                                tasks_list.append({
+                                    "id": task.id,
+                                    "type": task.type,
+                                    "status": task.status,
+                                    "created": task.created,
+                                    "worker_id": task.worker_id
+                                })
+                        
+                        self._send_json(conn, {
+                            "type": "tasks_list",
+                            "tasks": tasks_list,
+                            "timestamp": time.time()
+                        })
+                    
+                    else:
+                        # Неизвестный тип сообщения
+                        print(f"⚠️ Неизвестный тип: {msg_type}")
+                        
+                except Exception as e:
+                    print(f"❌ Ошибка обработки: {e}")
+                    break
             
-            else:
-                logger.warning(f"Неизвестный тип сообщения от рабочего {worker_id}: {msg_type}")
-                
         except Exception as e:
-            logger.error(f"Ошибка обработки сообщения от {worker_id}: {e}")
+            print(f"❌ Ошибка подключения: {e}")
+        finally:
+            # Очищаем
+            with self.lock:
+                if worker_id in self.workers:
+                    # Возвращаем задачу если есть
+                    worker = self.workers[worker_id]
+                    if worker.current_task:
+                        task_id = worker.current_task
+                        if task_id in self.tasks:
+                            task = self.tasks[task_id]
+                            if task.status == "running":
+                                task.status = "pending"
+                                task.worker_id = None
+                                self.task_queue.insert(0, task_id)
+                                print(f"↩️ Задача {task_id} возвращена в очередь")
+                    
+                    del self.workers[worker_id]
+            
+            try:
+                conn.close()
+            except:
+                pass
+            
+            print(f"🔌 Отключен: {worker_id}")
     
-    def _assign_pending_tasks(self):
-        """Назначить все pending задачи свободным рабочим"""
+    def _assign_tasks(self):
+        """Назначить задачи свободным рабочим"""
         with self.lock:
+            if not self.task_queue:
+                return
+            
             # Ищем свободных рабочих
             free_workers = []
             for worker_id, worker in self.workers.items():
@@ -332,9 +291,9 @@ class NetworkCoordinator:
             if not free_workers:
                 return
             
-            # Ищем pending задачи
+            # Берем задачи из очереди
             pending_tasks = []
-            for task_id in self.task_queue[:]:  # Копируем список
+            for task_id in self.task_queue[:]:  # Копируем
                 if task_id in self.tasks:
                     task = self.tasks[task_id]
                     if task.status == "pending":
@@ -343,57 +302,34 @@ class NetworkCoordinator:
             if not pending_tasks:
                 return
             
-            # Назначаем задачи
+            # Назначаем
             for worker_id in free_workers:
                 if not pending_tasks:
                     break
                 
                 task_id = pending_tasks.pop(0)
-                self._assign_task_to_worker(worker_id, task_id)
-    
-    def _cleanup_inactive_workers(self):
-        """Очистка неактивных рабочих"""
-        while self.running:
-            try:
-                time.sleep(30)  # Проверяем каждые 30 секунд
+                worker = self.workers[worker_id]
+                task = self.tasks[task_id]
                 
-                current_time = time.time()
-                to_remove = []
+                # Отправляем задачу
+                task_msg = {
+                    "type": "task",
+                    "task_id": task_id,
+                    "task_type": task.type,
+                    "data": task.data,
+                    "timestamp": time.time()
+                }
                 
-                with self.lock:
-                    for worker_id, worker in self.workers.items():
-                        # Если рабочий неактивен более 2 минут
-                        if current_time - worker.last_seen > 120:
-                            to_remove.append(worker_id)
-                
-                for worker_id in to_remove:
-                    logger.warning(f"Рабочий {worker_id} удален по таймауту")
+                if self._send_json(worker.conn, task_msg):
+                    task.status = "running"
+                    task.worker_id = worker_id
+                    worker.current_task = task_id
                     
-                    with self.lock:
-                        if worker_id in self.workers:
-                            worker = self.workers[worker_id]
-                            
-                            # Если у рабочего была задача, возвращаем ее в очередь
-                            if worker.current_task:
-                                task_id = worker.current_task
-                                if task_id in self.tasks:
-                                    task = self.tasks[task_id]
-                                    if task.status == "running":
-                                        task.status = "pending"
-                                        task.worker_id = None
-                                        self.task_queue.insert(0, task_id)
-                                        logger.info(f"Задача {task_id} возвращена в очередь")
-                            
-                            # Закрываем соединение
-                            try:
-                                worker.conn.close()
-                            except:
-                                pass
-                            
-                            del self.workers[worker_id]
-                
-            except Exception as e:
-                logger.error(f"Ошибка очистки рабочих: {e}")
+                    # Удаляем из очереди
+                    if task_id in self.task_queue:
+                        self.task_queue.remove(task_id)
+                    
+                    print(f"🎯 Задача {task_id} → {worker.name}")
     
     def _get_stats(self) -> Dict:
         """Получить статистику"""
@@ -406,129 +342,97 @@ class NetworkCoordinator:
             tasks_failed = len([t for t in self.tasks.values() if t.status == "failed"])
             
             return {
-                "workers_connected": workers_count,
+                "workers": workers_count,
                 "tasks_total": tasks_total,
                 "tasks_pending": tasks_pending,
                 "tasks_running": tasks_running,
                 "tasks_completed": tasks_completed,
                 "tasks_failed": tasks_failed,
-                "queue_length": len(self.task_queue),
-                "uptime": time.time() - self.stats["start_time"],
-                "timestamp": time.time(),
-                "coordinator": self.public_ip,
-                "port": self.port
+                "queue": len(self.task_queue),
+                "timestamp": time.time()
             }
     
-    def _handle_worker_connection(self, conn: socket.socket, addr: tuple):
-        """Обработка подключения рабочего/клиента"""
-        worker_id = f"worker_{addr[0]}:{addr[1]}_{int(time.time())}"
-        
-        logger.info(f"Новое подключение от {addr[0]}:{addr[1]}")
-        
-        try:
-            # Создаем объект рабочего
-            worker = Worker(
-                id=worker_id,
-                name=f"Worker_{worker_id[-6:]}",
-                addr=addr,
-                conn=conn,
-                last_seen=time.time()
-            )
+    def _cleanup_loop(self):
+        """Очистка неактивных рабочих"""
+        while self.running:
+            time.sleep(30)
+            
+            current_time = time.time()
+            to_remove = []
             
             with self.lock:
-                self.workers[worker_id] = worker
+                for worker_id, worker in self.workers.items():
+                    if current_time - worker.last_seen > 60:  # 1 минута
+                        to_remove.append(worker_id)
             
-            # Отправляем приветственное сообщение
-            welcome_msg = {
-                "type": "connected",
-                "worker_id": worker_id,
-                "message": "Подключено к AI Network. Отправьте 'register' для начала работы.",
-                "timestamp": time.time(),
-                "coordinator": self.public_ip
-            }
-            self._send_json(conn, welcome_msg)
-            
-            # Основной цикл обработки сообщений
-            while self.running:
-                try:
-                    # Читаем сообщение
-                    message = self._receive_json(conn, timeout=30)
-                    
-                    if not message:
-                        # Проверяем, не разорвано ли соединение
-                        try:
-                            # Пробуем отправить ping
-                            ping_msg = {"type": "ping", "timestamp": time.time()}
-                            if not self._send_json(conn, ping_msg):
-                                raise ConnectionError("Соединение разорвано")
-                        except:
-                            logger.info(f"Соединение с {worker_id} разорвано")
-                            break
+            for worker_id in to_remove:
+                print(f"⏰ Удален по таймауту: {worker_id}")
+                with self.lock:
+                    if worker_id in self.workers:
+                        worker = self.workers[worker_id]
                         
-                        continue
-                    
-                    # Обрабатываем сообщение
-                    self._process_worker_message(worker_id, conn, message)
-                    
-                except socket.timeout:
-                    # Отправляем heartbeat запрос
-                    heartbeat_msg = {"type": "heartbeat_req", "timestamp": time.time()}
-                    self._send_json(conn, heartbeat_msg)
-                    continue
-                    
-                except ConnectionError:
-                    logger.info(f"Соединение с {worker_id} потеряно")
-                    break
-                    
-                except Exception as e:
-                    logger.error(f"Ошибка обработки сообщения от {worker_id}: {e}")
-                    break
-            
-        except Exception as e:
-            logger.error(f"Ошибка обработки подключения {addr}: {e}")
-        finally:
-            # Удаляем рабочего
-            with self.lock:
-                if worker_id in self.workers:
-                    # Возвращаем задачу в очередь если есть
-                    worker = self.workers[worker_id]
-                    if worker.current_task:
-                        task_id = worker.current_task
-                        if task_id in self.tasks:
-                            task = self.tasks[task_id]
-                            if task.status == "running":
-                                task.status = "pending"
-                                task.worker_id = None
-                                self.task_queue.insert(0, task_id)
-                                logger.info(f"Задача {task_id} возвращена в очередь")
-                    
-                    del self.workers[worker_id]
-            
-            try:
-                conn.close()
-            except:
-                pass
-            
-            logger.info(f"Подключение {worker_id} закрыто")
+                        # Возвращаем задачу
+                        if worker.current_task:
+                            task_id = worker.current_task
+                            if task_id in self.tasks:
+                                task = self.tasks[task_id]
+                                if task.status == "running":
+                                    task.status = "pending"
+                                    task.worker_id = None
+                                    self.task_queue.insert(0, task_id)
+                                    print(f"↩️ Возвращена задача {task_id}")
+                        
+                        # Закрываем соединение
+                        try:
+                            worker.conn.close()
+                        except:
+                            pass
+                        
+                        del self.workers[worker_id]
     
-    def _run_server(self):
-        """Запуск сервера"""
+    def _task_assigner_loop(self):
+        """Цикл назначения задач"""
+        while self.running:
+            self._assign_tasks()
+            time.sleep(1)
+    
+    def start(self):
+        """Запуск координатора"""
+        self.running = True
+        
+        print("=" * 50)
+        print("🤖 AI NETWORK COORDINATOR")
+        print("=" * 50)
+        print(f"📍 Адрес: {VPS_IP}:{self.port}")
+        print(f"📡 Порт: {self.port}")
+        print("=" * 50)
+        
         try:
-            self.server_socket = self._create_socket()
-            self.server_socket.bind((self.host, self.port))
+            # Создаем сервер
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind(("0.0.0.0", self.port))
             self.server_socket.listen(10)
+            self.server_socket.settimeout(1)
             
-            logger.info(f"Сервер запущен на {self.host}:{self.port}")
-            logger.info(f"Публичный адрес: {self.public_ip}:{self.port}")
+            print(f"✅ Сервер запущен на порту {self.port}")
+            print("👷 Ожидание подключений...")
             
+            # Запускаем фоновые потоки
+            cleanup_thread = threading.Thread(target=self._cleanup_loop, daemon=True)
+            cleanup_thread.start()
+            
+            assigner_thread = threading.Thread(target=self._task_assigner_loop, daemon=True)
+            assigner_thread.start()
+            
+            # Основной цикл accept
             while self.running:
                 try:
                     conn, addr = self.server_socket.accept()
-                    conn.settimeout(30)
                     
                     # Запускаем обработчик в отдельном потоке
                     thread = threading.Thread(
-                        target=self._handle_worker_connection,
+                        target=self._handle_connection,
                         args=(conn, addr),
                         daemon=True
                     )
@@ -538,46 +442,10 @@ class NetworkCoordinator:
                     continue
                 except Exception as e:
                     if self.running:
-                        logger.error(f"Ошибка accept: {e}")
-                    
+                        print(f"❌ Ошибка accept: {e}")
+            
         except Exception as e:
-            logger.error(f"Ошибка запуска сервера: {e}")
-            self.running = False
-    
-    def start(self):
-        """Запуск координатора"""
-        self.running = True
-        
-        print("=" * 60)
-        print("🚀 AI NETWORK COORDINATOR")
-        print("=" * 60)
-        print(f"🌐 Сервер: {self.public_ip}:{self.port}")
-        print(f"📡 Порт: {self.port}")
-        print(f"🏠 Локально: {self.host}:{self.port}")
-        print("=" * 60)
-        print("✅ Система запущена!")
-        print("👷 Ожидание подключения рабочих...")
-        print("📨 Клиенты могут подключаться через тот же порт")
-        print("=" * 60)
-        
-        # Запускаем сервер
-        server_thread = threading.Thread(target=self._run_server, daemon=True)
-        server_thread.start()
-        
-        # Запускаем очистку неактивных рабочих
-        cleanup_thread = threading.Thread(target=self._cleanup_inactive_workers, daemon=True)
-        cleanup_thread.start()
-        
-        # Запускаем обработчик задач
-        task_thread = threading.Thread(target=self._task_processor_loop, daemon=True)
-        task_thread.start()
-        
-        try:
-            while self.running:
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            print("\n🛑 Остановка координатора...")
+            print(f"❌ Ошибка сервера: {e}")
         finally:
             self.running = False
             if self.server_socket:
@@ -586,67 +454,17 @@ class NetworkCoordinator:
                 except:
                     pass
             print("👋 Координатор остановлен")
-    
-    def _task_processor_loop(self):
-        """Цикл обработки задач"""
-        while self.running:
-            try:
-                self._assign_pending_tasks()
-                time.sleep(1)  # Проверяем каждую секунду
-            except Exception as e:
-                logger.error(f"Ошибка обработчика задач: {e}")
-                time.sleep(5)
 
-# ========== РАБОЧИЙ УЗЕЛ ==========
-class WorkerNode:
-    """Рабочий узел (может также отправлять задачи)"""
+# ========== РАБОЧИЙ ==========
+class SimpleWorker:
+    """Простой рабочий узел"""
     
-    def __init__(self, host: str, port: int = 8888, name: str = None):
+    def __init__(self, host: str = VPS_IP, port: int = PORT, name: str = None):
         self.host = host
         self.port = port
         self.name = name or f"Worker_{random.randint(1000, 9999)}"
         self.worker_id = None
         self.running = False
-        self.connected = False
-    
-    def _create_socket(self) -> socket.socket:
-        """Создать клиентский сокет"""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(10)
-        return sock
-    
-    def _send_json(self, sock: socket.socket, data: Dict) -> bool:
-        """Отправить JSON"""
-        try:
-            json_str = json.dumps(data, ensure_ascii=False)
-            sock.sendall(json_str.encode('utf-8'))
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка отправки: {e}")
-            return False
-    
-    def _receive_json(self, sock: socket.socket, timeout: int = 5) -> Optional[Dict]:
-        """Получить JSON"""
-        try:
-            sock.settimeout(timeout)
-            buffer = b""
-            
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                
-                try:
-                    return json.loads(buffer.decode('utf-8', errors='ignore'))
-                except json.JSONDecodeError:
-                    continue
-                    
-        except socket.timeout:
-            return None
-        except Exception as e:
-            print(f"❌ Ошибка приема: {e}")
-            return None
     
     def _process_task(self, task_type: str, task_data: Dict) -> Dict:
         """Обработать задачу"""
@@ -675,8 +493,7 @@ class WorkerNode:
                     "matrix_size": size,
                     "execution_time": round(exec_time, 3),
                     "worker": self.name,
-                    "checksum": hashlib.md5(str(result).encode()).hexdigest()[:8],
-                    "timestamp": time.time()
+                    "checksum": hashlib.md5(str(result).encode()).hexdigest()[:8]
                 }
             
             elif task_type == "calculation":
@@ -696,185 +513,173 @@ class WorkerNode:
                     },
                     "numbers_count": len(nums),
                     "execution_time": round(exec_time, 3),
-                    "worker": self.name,
-                    "timestamp": time.time()
+                    "worker": self.name
                 }
             
             else:
                 return {
                     "status": "error",
-                    "message": f"Неизвестный тип задачи: {task_type}",
-                    "timestamp": time.time()
+                    "message": f"Unknown task type: {task_type}"
                 }
                 
         except Exception as e:
             return {
                 "status": "error",
-                "message": str(e),
-                "timestamp": time.time()
+                "message": str(e)
             }
     
-    def _worker_loop(self, sock: socket.socket):
-        """Основной цикл работы рабочего"""
-        last_heartbeat = time.time()
-        
-        print(f"✅ Подключено к {self.host}:{self.port}")
-        print("🔄 Ожидание задач...")
-        
+    def _send_json(self, sock: socket.socket, data: Dict) -> bool:
+        """Отправить JSON"""
         try:
-            while self.running and self.connected:
-                current_time = time.time()
-                
-                # Отправляем heartbeat каждые 20 секунд
-                if current_time - last_heartbeat > 20:
-                    heartbeat = {"type": "heartbeat", "timestamp": current_time}
-                    if self._send_json(sock, heartbeat):
-                        last_heartbeat = current_time
-                
-                # Читаем сообщения
-                message = self._receive_json(sock, timeout=2)
-                
-                if message:
-                    msg_type = message.get("type")
-                    
-                    if msg_type == "task":
-                        # Получили задачу
-                        task_id = message.get("task_id")
-                        task_type = message.get("task_type")
-                        task_data = message.get("data", {})
-                        
-                        print(f"📥 Получена задача {task_id} ({task_type})")
-                        
-                        # Выполняем задачу
-                        result = self._process_task(task_type, task_data)
-                        
-                        # Отправляем результат
-                        response = {
-                            "type": "task_result",
-                            "task_id": task_id,
-                            "result": result,
-                            "timestamp": time.time()
-                        }
-                        
-                        if self._send_json(sock, response):
-                            if result.get("status") == "success":
-                                print(f"✅ Задача {task_id} выполнена за {result.get('execution_time', 0):.3f} сек")
-                            else:
-                                print(f"⚠️ Задача {task_id} ошибка: {result.get('message')}")
-                    
-                    elif msg_type == "heartbeat_req":
-                        # Ответ на heartbeat запрос
-                        response = {"type": "heartbeat", "timestamp": time.time()}
-                        self._send_json(sock, response)
-                    
-                    elif msg_type == "ping":
-                        # Ответ на ping
-                        response = {"type": "pong", "timestamp": time.time()}
-                        self._send_json(sock, response)
-                    
-                    elif msg_type == "connected":
-                        # Первое сообщение после подключения
-                        print(f"📡 {message.get('message', 'Connected')}")
-                        
-                        # Регистрируемся как рабочий
-                        register_msg = {
-                            "type": "register",
-                            "name": self.name,
-                            "capabilities": {
-                                "cpu_cores": 1,
-                                "supported_tasks": ["matrix_mult", "calculation"],
-                                "performance": random.randint(50, 100)
-                            },
-                            "timestamp": time.time()
-                        }
-                        self._send_json(sock, register_msg)
-                    
-                    elif msg_type == "welcome":
-                        # Ответ на регистрацию
-                        self.worker_id = message.get("worker_id")
-                        print(f"👋 {message.get('message', 'Welcome')}")
-                        print(f"🆔 ID: {self.worker_id}")
-                
-                elif message is None:
-                    # Таймаут - это нормально, продолжаем цикл
-                    continue
-                    
-        except Exception as e:
-            print(f"❌ Ошибка в рабочем цикле: {e}")
-            self.connected = False
-        finally:
-            try:
-                sock.close()
-            except:
-                pass
+            sock.sendall(json.dumps(data).encode())
+            return True
+        except:
+            return False
+    
+    def _receive_json(self, sock: socket.socket) -> Optional[Dict]:
+        """Получить JSON"""
+        try:
+            sock.settimeout(2)
+            data = sock.recv(4096)
+            if data:
+                return json.loads(data.decode())
+        except:
+            pass
+        return None
     
     def start(self):
-        """Запуск рабочего узла"""
+        """Запуск рабочего"""
         self.running = True
         
-        print(f"👷 Запуск рабочего узла: {self.name}")
+        print(f"👷 Рабочий: {self.name}")
         print(f"📡 Подключение к {self.host}:{self.port}")
         print("=" * 50)
         
         reconnect_delay = 2
-        max_reconnect_delay = 30
         
         while self.running:
             try:
-                sock = self._create_socket()
-                print(f"Подключение...")
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(5)
+                
+                print("Подключение...")
                 sock.connect((self.host, self.port))
                 
-                self.connected = True
-                reconnect_delay = 2  # Сбрасываем задержку
+                print("✅ Подключено!")
                 
-                self._worker_loop(sock)
+                # Регистрируемся
+                self._send_json(sock, {
+                    "type": "register",
+                    "name": self.name,
+                    "timestamp": time.time()
+                })
                 
-                if self.running and not self.connected:
-                    print(f"🔌 Переподключение через {reconnect_delay} сек...")
-                    time.sleep(reconnect_delay)
-                    reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                # Основной цикл
+                last_heartbeat = time.time()
+                
+                while self.running:
+                    current_time = time.time()
+                    
+                    # Отправляем heartbeat каждые 20 сек
+                    if current_time - last_heartbeat > 20:
+                        if self._send_json(sock, {
+                            "type": "heartbeat",
+                            "timestamp": current_time
+                        }):
+                            last_heartbeat = current_time
+                    
+                    # Читаем сообщения
+                    message = self._receive_json(sock)
+                    
+                    if message:
+                        msg_type = message.get("type")
+                        
+                        if msg_type == "welcome":
+                            print(f"📡 {message.get('message')}")
+                        
+                        elif msg_type == "registered":
+                            self.worker_id = message.get("worker_id")
+                            print(f"✅ Зарегистрирован как {message.get('name')}")
+                            print(f"🆔 ID: {self.worker_id}")
+                        
+                        elif msg_type == "task":
+                            # Получили задачу!
+                            task_id = message.get("task_id")
+                            task_type = message.get("task_type")
+                            task_data = message.get("data", {})
+                            
+                            print(f"📥 Задача {task_id}: {task_type}")
+                            
+                            # Выполняем
+                            result = self._process_task(task_type, task_data)
+                            
+                            # Отправляем результат
+                            self._send_json(sock, {
+                                "type": "task_result",
+                                "task_id": task_id,
+                                "result": result,
+                                "timestamp": time.time()
+                            })
+                            
+                            if result.get("status") == "success":
+                                exec_time = result.get("execution_time", 0)
+                                print(f"✅ Выполнено за {exec_time:.3f} сек")
+                            else:
+                                print(f"❌ Ошибка: {result.get('message')}")
+                        
+                        elif msg_type == "heartbeat_ack":
+                            # Heartbeat подтвержден
+                            pass
+                    
+                    elif message is None:
+                        # Таймаут - нормально, продолжаем
+                        continue
+                
+                sock.close()
                 
             except ConnectionRefusedError:
                 print(f"❌ Сервер недоступен. Повтор через {reconnect_delay} сек...")
                 time.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, 30)
                 
             except socket.timeout:
-                print(f"❌ Таймаут подключения. Повтор через {reconnect_delay} сек...")
+                print(f"❌ Таймаут. Повтор через {reconnect_delay} сек...")
                 time.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, 30)
                 
             except KeyboardInterrupt:
-                print("\n👋 Завершение работы...")
+                print("\n👋 Остановка...")
                 self.running = False
                 break
                 
             except Exception as e:
                 print(f"❌ Ошибка: {e}")
                 time.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 1.5, 30)
         
-        print("👷 Рабочий узел остановлен")
+        print("👷 Рабочий остановлен")
 
-# ========== КЛИЕНТ ДЛЯ ОТПРАВКИ ЗАДАЧ ==========
-class TaskClient:
+# ========== ПРОСТОЙ КЛИЕНТ ==========
+class SimpleClient:
     """Простой клиент для отправки задач"""
     
-    def __init__(self, host: str, port: int = 8888):
-        self.host = host
-        self.port = port
-    
-    def submit_task(self, task_type: str, task_data: Dict) -> Optional[str]:
+    @staticmethod
+    def submit_task(host: str = VPS_IP, port: int = PORT, 
+                   task_type: str = "matrix_mult", task_data: Dict = None) -> Optional[str]:
         """Отправить задачу"""
+        if task_data is None:
+            task_data = {"size": 10} if task_type == "matrix_mult" else {"numbers": 1000}
+        
         try:
+            print(f"🔗 Подключение к {host}:{port}...")
+            
+            # Очень простое подключение
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10)
+            sock.settimeout(3)  # Короткий таймаут
             
-            print(f"Подключение к {self.host}:{self.port}...")
-            sock.connect((self.host, self.port))
+            sock.connect((host, port))
             
-            # Сразу отправляем задачу (ведем себя как рабочий, но только отправляем)
+            # Сразу отправляем задачу
             message = {
                 "type": "submit_task",
                 "task_type": task_type,
@@ -882,34 +687,30 @@ class TaskClient:
                 "timestamp": time.time()
             }
             
-            json_str = json.dumps(message, ensure_ascii=False)
-            sock.sendall(json_str.encode('utf-8'))
+            sock.sendall(json.dumps(message).encode())
+            print("📨 Задача отправлена")
             
             # Ждем ответ
-            sock.settimeout(5)
-            buffer = b""
-            
-            while True:
-                chunk = sock.recv(4096)
-                if not chunk:
-                    break
-                buffer += chunk
-                
-                try:
-                    response = json.loads(buffer.decode('utf-8', errors='ignore'))
-                    sock.close()
-                    
-                    if response.get("type") == "task_submitted":
-                        return response.get("task_id")
+            sock.settimeout(2)
+            try:
+                response = sock.recv(4096)
+                if response:
+                    result = json.loads(response.decode())
+                    if result.get("type") == "task_created":
+                        task_id = result.get("task_id")
+                        print(f"✅ Задача создана: {task_id}")
+                        sock.close()
+                        return task_id
                     else:
-                        print(f"❌ Ошибка: {response}")
-                        return None
-                        
-                except json.JSONDecodeError:
-                    continue
+                        print(f"❌ Ответ: {result}")
+                else:
+                    print("❌ Нет ответа от сервера")
+            except socket.timeout:
+                print("⏰ Таймаут ожидания ответа")
+            except Exception as e:
+                print(f"❌ Ошибка чтения: {e}")
             
             sock.close()
-            print("❌ Не получили ответ от сервера")
             return None
             
         except socket.timeout:
@@ -919,86 +720,82 @@ class TaskClient:
             print("❌ Сервер недоступен")
             return None
         except Exception as e:
-            print(f"❌ Ошибка: {e}")
+            print(f"❌ Ошибка: {type(e).__name__}: {e}")
             return None
     
-    def get_stats(self) -> Optional[Dict]:
+    @staticmethod
+    def get_stats(host: str = VPS_IP, port: int = PORT) -> Optional[Dict]:
         """Получить статистику"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self.host, self.port))
+            sock.settimeout(3)
+            sock.connect((host, port))
             
-            message = {
+            sock.sendall(json.dumps({
                 "type": "get_stats",
                 "timestamp": time.time()
-            }
+            }).encode())
             
-            sock.sendall(json.dumps(message).encode('utf-8'))
-            
-            sock.settimeout(3)
-            buffer = sock.recv(4096)
+            sock.settimeout(2)
+            response = sock.recv(4096)
             sock.close()
             
-            if buffer:
-                return json.loads(buffer.decode('utf-8', errors='ignore'))
+            if response:
+                return json.loads(response.decode())
             
             return None
             
-        except Exception as e:
-            print(f"❌ Ошибка получения статистики: {e}")
+        except:
             return None
     
-    def get_tasks(self) -> Optional[Dict]:
+    @staticmethod
+    def get_tasks(host: str = VPS_IP, port: int = PORT) -> Optional[Dict]:
         """Получить список задач"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self.host, self.port))
+            sock.settimeout(3)
+            sock.connect((host, port))
             
-            message = {
+            sock.sendall(json.dumps({
                 "type": "get_tasks",
                 "timestamp": time.time()
-            }
+            }).encode())
             
-            sock.sendall(json.dumps(message).encode('utf-8'))
-            
-            sock.settimeout(3)
-            buffer = sock.recv(4096)
+            sock.settimeout(2)
+            response = sock.recv(4096)
             sock.close()
             
-            if buffer:
-                return json.loads(buffer.decode('utf-8', errors='ignore'))
+            if response:
+                return json.loads(response.decode())
             
             return None
             
-        except Exception as e:
-            print(f"❌ Ошибка получения списка задач: {e}")
+        except:
             return None
 
 # ========== ГЛАВНАЯ ФУНКЦИЯ ==========
 def main():
     parser = argparse.ArgumentParser(
-        description="🚀 AI Network - Децентрализованная сеть вычислений",
+        description="🚀 AI Network - Простая децентрализованная сеть",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
     parser.add_argument('--coordinator', action='store_true',
-                       help='Запустить координатор сети')
+                       help='Запустить координатор')
     parser.add_argument('--worker', action='store_true',
                        help='Запустить рабочий узел')
     parser.add_argument('--submit', nargs='?', const='matrix_mult',
-                       help='Отправить задачу (тип: matrix_mult, calculation)')
+                       help='Отправить задачу (matrix_mult или calculation)')
     parser.add_argument('--stats', action='store_true',
-                       help='Получить статистику сети')
+                       help='Показать статистику')
     parser.add_argument('--tasks', action='store_true',
-                       help='Получить список задач')
-    parser.add_argument('--host', default="185.185.142.113",
-                       help='Адрес координатора')
-    parser.add_argument('--port', type=int, default=8888,
-                       help='Порт координатора')
+                       help='Показать список задач')
+    parser.add_argument('--host', default=VPS_IP,
+                       help=f'Адрес координатора (по умолчанию: {VPS_IP})')
+    parser.add_argument('--port', type=int, default=PORT,
+                       help=f'Порт (по умолчанию: {PORT})')
     parser.add_argument('--name', 
-                       help='Имя рабочего узла')
+                       help='Имя рабочего')
     parser.add_argument('--size', type=int, default=10,
                        help='Размер матрицы (для matrix_mult)')
     parser.add_argument('--numbers', type=int, default=1000,
@@ -1007,11 +804,13 @@ def main():
     args = parser.parse_args()
     
     if args.coordinator:
-        coordinator = NetworkCoordinator(port=args.port)
+        # Запуск координатора
+        coordinator = SimpleCoordinator(port=args.port)
         coordinator.start()
     
     elif args.worker:
-        worker = WorkerNode(
+        # Запуск рабочего
+        worker = SimpleWorker(
             host=args.host,
             port=args.port,
             name=args.name
@@ -1019,8 +818,7 @@ def main():
         worker.start()
     
     elif args.submit:
-        client = TaskClient(host=args.host, port=args.port)
-        
+        # Отправка задачи
         task_type = args.submit
         task_data = {}
         
@@ -1030,87 +828,104 @@ def main():
             task_data = {"numbers": args.numbers}
         else:
             print(f"❌ Неизвестный тип задачи: {task_type}")
+            print("   Доступно: matrix_mult, calculation")
             return
         
         print(f"📨 Отправка задачи '{task_type}'...")
-        task_id = client.submit_task(task_type, task_data)
+        task_id = SimpleClient.submit_task(
+            host=args.host,
+            port=args.port,
+            task_type=task_type,
+            task_data=task_data
+        )
         
         if task_id:
-            print(f"✅ Задача отправлена: {task_id}")
-            print(f"📊 Для проверки: python ai_network.py --tasks --host {args.host}")
+            print(f"✅ Успешно! ID задачи: {task_id}")
+            print(f"📊 Проверить: python ai_network.py --tasks --host {args.host}")
         else:
             print("❌ Не удалось отправить задачу")
     
     elif args.stats:
-        client = TaskClient(host=args.host, port=args.port)
-        stats = client.get_stats()
+        # Показать статистику
+        stats_data = SimpleClient.get_stats(host=args.host, port=args.port)
         
-        if stats and stats.get("type") == "stats":
+        if stats_data and stats_data.get("type") == "stats":
+            stats = stats_data.get("stats", {})
             print("📊 СТАТИСТИКА СЕТИ:")
-            print(f"   Рабочих онлайн: {stats['stats'].get('workers_connected', 0)}")
-            print(f"   Всего задач: {stats['stats'].get('tasks_total', 0)}")
-            print(f"   Ожидают: {stats['stats'].get('tasks_pending', 0)}")
-            print(f"   Выполняются: {stats['stats'].get('tasks_running', 0)}")
-            print(f"   Завершено: {stats['stats'].get('tasks_completed', 0)}")
-            print(f"   Ошибок: {stats['stats'].get('tasks_failed', 0)}")
-            print(f"   В очереди: {stats['stats'].get('queue_length', 0)}")
-            print(f"   Аптайм: {stats['stats'].get('uptime', 0):.1f} сек")
-            print(f"   Координатор: {stats['stats'].get('coordinator')}:{stats['stats'].get('port')}")
+            print(f"   Рабочих онлайн: {stats.get('workers', 0)}")
+            print(f"   Всего задач: {stats.get('tasks_total', 0)}")
+            print(f"   Ожидают: {stats.get('tasks_pending', 0)}")
+            print(f"   Выполняются: {stats.get('tasks_running', 0)}")
+            print(f"   Завершено: {stats.get('tasks_completed', 0)}")
+            print(f"   Ошибок: {stats.get('tasks_failed', 0)}")
+            print(f"   В очереди: {stats.get('queue', 0)}")
+            if stats.get('timestamp'):
+                print(f"   Время: {time.strftime('%H:%M:%S', time.localtime(stats['timestamp']))}")
         else:
             print("❌ Не удалось получить статистику")
     
     elif args.tasks:
-        client = TaskClient(host=args.host, port=args.port)
-        tasks_data = client.get_tasks()
+        # Показать задачи
+        tasks_data = SimpleClient.get_tasks(host=args.host, port=args.port)
         
         if tasks_data and tasks_data.get("type") == "tasks_list":
             tasks = tasks_data.get("tasks", [])
             print(f"📝 ЗАДАЧИ ({len(tasks)}):")
             
             for task in tasks:
-                status_icon = {
+                status_icons = {
                     "pending": "⏳",
-                    "running": "🔄",
+                    "running": "🔄", 
                     "completed": "✅",
                     "failed": "❌"
-                }.get(task.get("status", ""), "❓")
+                }
                 
-                print(f"  {status_icon} [{task.get('id', '?')[:8]}] {task.get('type', '?')} - {task.get('status', '?')}")
+                icon = status_icons.get(task.get("status"), "❓")
+                task_id_short = task.get("id", "?")[:8]
+                task_type = task.get("type", "?")
+                status = task.get("status", "?")
+                
+                print(f"  {icon} [{task_id_short}] {task_type} - {status}")
+                
                 if task.get("worker_id"):
-                    print(f"     Рабочий: {task.get('worker_id', '?')[:8]}")
+                    print(f"     ↳ Рабочий: {task.get('worker_id', '?')[:8]}")
         else:
             print("❌ Не удалось получить список задач")
     
     else:
-        print("=" * 70)
-        print("🤖 AI NETWORK - ДЕЦЕНТРАЛИЗОВАННАЯ СЕТЬ ВЫЧИСЛЕНИЙ")
-        print("=" * 70)
+        # Показать справку
+        print("=" * 60)
+        print("🤖 AI NETWORK - ПРОСТАЯ ДЕЦЕНТРАЛИЗОВАННАЯ СЕТЬ")
+        print("=" * 60)
         print()
         print("КОМАНДЫ:")
         print("  --coordinator           Запустить координатор")
         print("  --worker                Запустить рабочий узел")
         print("  --submit [тип]          Отправить задачу")
-        print("  --stats                 Получить статистику")
-        print("  --tasks                 Получить список задач")
+        print("  --stats                 Показать статистику")
+        print("  --tasks                 Показать список задач")
         print()
         print("ПРИМЕРЫ:")
-        print("  1. Запуск координатора:")
-        print("     python ai_network.py --coordinator --port 8888")
+        print(f"  1. Запуск координатора:")
+        print(f"     python ai_network.py --coordinator --port {PORT}")
         print()
-        print("  2. Подключение рабочего:")
-        print("     python ai_network.py --worker --host 185.185.142.113 --name 'MyPC'")
+        print(f"  2. Подключение рабочего:")
+        print(f"     python ai_network.py --worker --host {VPS_IP} --name 'MyPC'")
         print()
-        print("  3. Отправить задачу умножения матриц:")
-        print("     python ai_network.py --submit matrix_mult --size 15")
+        print(f"  3. Отправить задачу умножения матриц:")
+        print(f"     python ai_network.py --submit matrix_mult --size 15")
         print()
-        print("  4. Отправить вычислительную задачу:")
-        print("     python ai_network.py --submit calculation --numbers 5000")
+        print(f"  4. Отправить вычислительную задачу:")
+        print(f"     python ai_network.py --submit calculation --numbers 5000")
         print()
-        print("  5. Получить статистику:")
-        print("     python ai_network.py --stats --host 185.185.142.113")
+        print(f"  5. Показать статистику:")
+        print(f"     python ai_network.py --stats --host {VPS_IP}")
         print()
-        print("📡 Сервер: 185.185.142.113:8888")
-        print("=" * 70)
+        print(f"  6. Показать задачи:")
+        print(f"     python ai_network.py --tasks --host {VPS_IP}")
+        print()
+        print(f"📡 Сервер: {VPS_IP}:{PORT}")
+        print("=" * 60)
 
 if __name__ == "__main__":
     try:
@@ -1118,6 +933,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\n👋 Программа завершена")
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
+        print(f"❌ Ошибка: {e}")
         import traceback
         traceback.print_exc()
